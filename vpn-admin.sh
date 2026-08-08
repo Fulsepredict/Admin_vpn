@@ -318,6 +318,40 @@ system_info() {
     pause
 }
 
+# 10. Миграция — инструкция по переезду на новый сервер
+migration() {
+    header "🚚 Миграция / Смена IP"
+
+    local ip
+    ip=$(get_ip)
+
+    echo -e "  ${BOLD}Текущий IP:${NC} ${CYAN}${ip}${NC}"
+    echo ""
+    echo -e "  ${YELLOW}⚠ Сменить IP на текущем сервере нельзя —${NC}"
+    echo -e "  ${YELLOW}  это делается у хостера (новый VPS или запрос в поддержку).${NC}"
+    echo ""
+    echo -e "  ${BOLD}Как переехать на новый сервер:${NC}"
+    echo ""
+    echo -e "  ${DIM}1.${NC} Купи новый VPS (Ubuntu 20.04+)"
+    echo -e "  ${DIM}2.${NC} Зайди на него по SSH"
+    echo -e "  ${DIM}3.${NC} Вставь одну команду:"
+    echo ""
+    echo -e "  ${CYAN}bash <(curl -fsSL https://raw.githubusercontent.com/Fulsepredict/Admin_vpn/main/setup.sh)${NC}"
+    echo ""
+    echo -e "  ${DIM}4.${NC} Получишь новую ссылку — вставь в NekoBox"
+    echo -e "  ${DIM}5.${NC} Готово! Новый IP, чистый VPN за 2 минуты."
+    echo ""
+
+    echo -e "  ${BOLD}Сделать бэкап текущего конфига перед миграцией? (y/n):${NC} "
+    read -r confirm
+    if [[ "$confirm" == "y" || "$confirm" == "Y" ]]; then
+        backup_config
+        return
+    fi
+
+    pause
+}
+
 # ============================================================
 # Главное меню
 # ============================================================
@@ -332,16 +366,17 @@ fi
 # Это нужно для быстрых команд типа: vpn-admin status
 if [[ -n "$1" ]]; then
     case "$1" in
-        status)   show_status ;;
-        logs)     show_logs ;;
-        password) change_password ;;
-        link)     show_link ;;
-        restart)  restart_server ;;
-        toggle)   toggle_server ;;
-        update)   update_hysteria ;;
-        backup)   backup_config ;;
-        info)     system_info ;;
-        *)        echo "Использование: vpn-admin {status|logs|password|link|restart|toggle|update|backup|info}" ;;
+        status)    show_status ;;
+        logs)      show_logs ;;
+        password)  change_password ;;
+        link)      show_link ;;
+        restart)   restart_server ;;
+        toggle)    toggle_server ;;
+        update)    update_hysteria ;;
+        backup)    backup_config ;;
+        info)      system_info ;;
+        migrate)   migration ;;
+        *)         echo "Использование: vpn-admin {status|logs|password|link|restart|toggle|update|backup|info|migrate}" ;;
     esac
     exit 0
 fi
@@ -373,12 +408,13 @@ while true; do
     echo -e "${CYAN}  ║${NC}   ${BOLD}7${NC} │ ⬆️   Обновить Hysteria2        ${CYAN}║${NC}"
     echo -e "${CYAN}  ║${NC}   ${BOLD}8${NC} │ 💾  Бэкап конфига             ${CYAN}║${NC}"
     echo -e "${CYAN}  ║${NC}   ${BOLD}9${NC} │ 🖥️   Инфо о системе            ${CYAN}║${NC}"
+    echo -e "${CYAN}  ║${NC}  ${BOLD}10${NC} │ 🚚  Миграция / Смена IP       ${CYAN}║${NC}"
     echo -e "${CYAN}  ║${NC}                                      ${CYAN}║${NC}"
     echo -e "${CYAN}  ║${NC}   ${RED}0${NC} │ 🚪  Выход                     ${CYAN}║${NC}"
     echo -e "${CYAN}  ║${NC}                                      ${CYAN}║${NC}"
     echo -e "${CYAN}  ╚══════════════════════════════════════╝${NC}"
     echo ""
-    echo -ne "  ${BOLD}Выбери пункт [0-9]: ${NC}"
+    echo -ne "  ${BOLD}Выбери пункт [0-10]: ${NC}"
     read -r choice
 
     case "$choice" in
@@ -391,6 +427,7 @@ while true; do
         7) update_hysteria ;;
         8) backup_config ;;
         9) system_info ;;
+        10) migration ;;
         0) echo -e "\n  ${DIM}👋 До встречи!${NC}\n"; exit 0 ;;
         *) echo -e "\n  ${RED}Неверный выбор. Попробуй ещё раз.${NC}"; sleep 1 ;;
     esac
