@@ -49,17 +49,16 @@ if ! command -v apt &> /dev/null; then
     exit 1
 fi
 
-# Ждем освобождения apt-lock, если сервер только что загрузился
-while fuser /var/lib/dpkg/lock-frontend >/dev/null 2>&1 || fuser /var/lib/apt/lists/lock >/dev/null 2>&1; do
-    echo -e "  ${DIM}Ожидаем завершения инициализации сервера...${NC}"
-    sleep 3
-done
+# Снимаем возможные зависшие замки от прерванных процессов
+killall -q apt apt-get dpkg 2>/dev/null || true
+rm -f /var/lib/apt/lists/lock /var/cache/apt/archives/lock /var/lib/dpkg/lock* 2>/dev/null || true
+dpkg --configure -a > /dev/null 2>&1 || true
 
 # ============================================================
 # Шаг 1: Обновление списков пакетов
 # ============================================================
 echo -e "${YELLOW}[1/8]${NC} Обновление списков пакетов..."
-apt-get update -qq > /dev/null 2>&1 || true
+apt-get update -qq -o Acquire::http::Timeout=6 -o Acquire::https::Timeout=6 -o Acquire::Retries=1 > /dev/null 2>&1 || true
 echo -e "  ${GREEN}✅ Списки пакетов обновлены${NC}"
 
 # ============================================================
