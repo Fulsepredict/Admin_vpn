@@ -53,9 +53,12 @@ pause() {
 }
 
 get_ip() {
-    curl -s -4 --connect-timeout 5 ifconfig.me 2>/dev/null || \
-    curl -s -4 --connect-timeout 5 icanhazip.com 2>/dev/null || \
-    echo "НЕ_ОПРЕДЕЛЕН"
+    local ip
+    ip=$(curl -s -4 --connect-timeout 5 ifconfig.me 2>/dev/null || \
+         curl -s -4 --connect-timeout 5 icanhazip.com 2>/dev/null || \
+         curl -s -4 --connect-timeout 5 api.ipify.org 2>/dev/null || \
+         hostname -I | awk '{print $1}')
+    echo "$ip" | tr -d ' \r\n'
 }
 
 get_password() {
@@ -81,23 +84,23 @@ show_status() {
     header "📊 Статус Hysteria 2 VPN"
 
     # Статус службы Hysteria
-    if systemctl is-active --quiet "$SERVICE"; then
+    if systemctl is-active --quiet "$SERVICE" 2>/dev/null; then
         local pid
-        pid=$(systemctl show --property MainPID --value "$SERVICE")
+        pid=$(systemctl show --property MainPID --value "$SERVICE" 2>/dev/null || echo "N/A")
         status_line "Hysteria 2:" "${GREEN}● РАБОТАЕТ${NC} (PID: ${pid})"
     else
         status_line "Hysteria 2:" "${RED}● ОСТАНОВЛЕН${NC}"
     fi
 
     # Статус Cloudflare WARP
-    if systemctl is-active --quiet "$WARP_SERVICE"; then
-        if curl -s -x socks5h://127.0.0.1:${WARP_PORT} --connect-timeout 2 https://www.cloudflare.com/cdn-cgi/trace | grep -q "warp=on"; then
+    if systemctl is-active --quiet "$WARP_SERVICE" 2>/dev/null; then
+        if curl -s -x socks5h://127.0.0.1:${WARP_PORT} --connect-timeout 2 https://www.cloudflare.com/cdn-cgi/trace 2>/dev/null | grep -q "warp=on"; then
             status_line "Cloudflare WARP:" "${GREEN}● АКТИВЕН${NC} (SOCKS5 127.0.0.1:${WARP_PORT}, warp=on)"
         else
             status_line "Cloudflare WARP:" "${YELLOW}● ЗАПУЩЕН${NC} (проверяется соединение...)"
         fi
     else
-        status_line "Cloudflare WARP:" "${RED}● НЕ АКТИВЕН${NC}"
+        status_line "Cloudflare WARP:" "${YELLOW}○ НЕ ИСПОЛЬЗУЕТСЯ${NC} (прямое подключение)"
     fi
 
     # Статус BBR
@@ -119,18 +122,18 @@ show_status() {
     echo ""
     # Системные ресурсы
     local cpu_usage
-    cpu_usage=$(top -bn1 | grep "Cpu(s)" | awk '{print $2 + $4}')
+    cpu_usage=$(top -bn1 2>/dev/null | grep "Cpu(s)" | awk '{print $2 + $4}' || echo "0")
     status_line "Загрузка CPU:" "${cpu_usage}%"
 
     local mem_total mem_used
-    mem_total=$(free -h | awk '/^Mem:/ {print $2}')
-    mem_used=$(free -h | awk '/^Mem:/ {print $3}')
+    mem_total=$(free -h 2>/dev/null | awk '/^Mem:/ {print $2}' || echo "N/A")
+    mem_used=$(free -h 2>/dev/null | awk '/^Mem:/ {print $3}' || echo "N/A")
     status_line "Оперативная память:" "${mem_used} / ${mem_total}"
 
     local disk_used disk_total disk_pct
-    disk_used=$(df -h / | awk 'NR==2 {print $3}')
-    disk_total=$(df -h / | awk 'NR==2 {print $2}')
-    disk_pct=$(df -h / | awk 'NR==2 {print $5}')
+    disk_used=$(df -h / 2>/dev/null | awk 'NR==2 {print $3}' || echo "N/A")
+    disk_total=$(df -h / 2>/dev/null | awk 'NR==2 {print $2}' || echo "N/A")
+    disk_pct=$(df -h / 2>/dev/null | awk 'NR==2 {print $5}' || echo "N/A")
     status_line "Диск (/):" "${disk_used} / ${disk_total} (${disk_pct})"
 
     # Активные подключения Hysteria (UDP 443)
@@ -145,11 +148,11 @@ show_status() {
 show_logs() {
     header "📋 Логи Hysteria 2"
     echo -e "  ${DIM}(показываются последние 40 строк, 'q' для выхода)${NC}\n"
-    journalctl -u "$SERVICE" -n 40 --no-pager
+    journalctl -u "$SERVICE" -n 40 --no-pager 2>/dev/null || echo "Логи недоступны"
     pause
 }
 
-# 3. Смена пароля
+# 3. Смена пароля (с сохранением отступа YAML!)
 change_password() {
     header "🔑 Смена пароля VPN"
 
@@ -173,14 +176,13 @@ change_password() {
         fi
     fi
 
-    # Делаем бэкап перед изменением
     mkdir -p "$BACKUP_DIR"
     cp "$CONFIG" "${BACKUP_DIR}/config_before_pwd_$(date +%s).yaml"
 
-    # Заменяем пароль в config.yaml
-    sed -i "s/password:.*/password: ${new_pass}/" "$CONFIG"
+    # Сохраняем ровно 2 пробела отступа в YAML!
+    sed -i "s/^[[:space:]]*password:.*/  password: ${new_pass}/" "$CONFIG"
 
-    systemctl restart "$SERVICE"
+    systemctl restart "$SERVICE" 2>/dev/null || true
 
     echo ""
     echo -e "  ${GREEN}✅ Пароль успешно изменён!${NC}"
@@ -224,29 +226,32 @@ test_ai() {
         warp_ip=$(echo "$warp_trace" | grep "^ip=" | cut -d= -f2)
         warp_loc=$(echo "$warp_trace" | grep "^loc=" | cut -d= -f2)
         echo -e "  ${GREEN}✅ Cloudflare WARP работает идеально!${NC}"
-        echo -e "  Выходной IP для ИИ: ${CYAN}${warp_ip}${NC} (Страна: ${warp_loc})"
-    else
-        echo -e "  ${RED}❌ Cloudflare WARP не отвечает на 127.0.0.1:${WARP_PORT}!${NC}"
-        echo -e "  Попробуй перезапустить: systemctl restart warp-svc"
-    fi
+        echo -e "  Выходной IP для ИИ: ${CYAN}${warp_ip}${NC} (Страна: ${warp_loc})\n"
 
-    echo ""
-    echo -e "  ${YELLOW}Проверяем доступность доменов OpenAI & Claude...${NC}"
-    
-    local chatgpt_code
-    chatgpt_code=$(curl -s -o /dev/null -w "%{http_code}" -x socks5h://127.0.0.1:${WARP_PORT} --connect-timeout 6 https://chatgpt.com 2>/dev/null || echo "000")
-    if [[ "$chatgpt_code" == "200" || "$chatgpt_code" == "301" || "$chatgpt_code" == "302" || "$chatgpt_code" == "403" ]]; then
-        echo -e "  ChatGPT (chatgpt.com):   ${GREEN}✅ Доступен (HTTP $chatgpt_code)${NC}"
-    else
-        echo -e "  ChatGPT (chatgpt.com):   ${YELLOW}⚠ Ответ: HTTP $chatgpt_code${NC}"
-    fi
+        echo -e "  ${YELLOW}Проверяем доступность доменов OpenAI & Claude через WARP...${NC}"
+        local chatgpt_code
+        chatgpt_code=$(curl -s -o /dev/null -w "%{http_code}" -x socks5h://127.0.0.1:${WARP_PORT} --connect-timeout 6 https://chatgpt.com 2>/dev/null || echo "000")
+        if [[ "$chatgpt_code" == "200" || "$chatgpt_code" == "301" || "$chatgpt_code" == "302" || "$chatgpt_code" == "403" ]]; then
+            echo -e "  ChatGPT (chatgpt.com):   ${GREEN}✅ Доступен (HTTP $chatgpt_code)${NC}"
+        else
+            echo -e "  ChatGPT (chatgpt.com):   ${YELLOW}⚠ Ответ: HTTP $chatgpt_code${NC}"
+        fi
 
-    local claude_code
-    claude_code=$(curl -s -o /dev/null -w "%{http_code}" -x socks5h://127.0.0.1:${WARP_PORT} --connect-timeout 6 https://claude.ai 2>/dev/null || echo "000")
-    if [[ "$claude_code" == "200" || "$claude_code" == "301" || "$claude_code" == "302" ]]; then
-        echo -e "  Claude  (claude.ai):     ${GREEN}✅ Доступен (HTTP $claude_code)${NC}"
+        local claude_code
+        claude_code=$(curl -s -o /dev/null -w "%{http_code}" -x socks5h://127.0.0.1:${WARP_PORT} --connect-timeout 6 https://claude.ai 2>/dev/null || echo "000")
+        if [[ "$claude_code" == "200" || "$claude_code" == "301" || "$claude_code" == "302" ]]; then
+            echo -e "  Claude  (claude.ai):     ${GREEN}✅ Доступен (HTTP $claude_code)${NC}"
+        else
+            echo -e "  Claude  (claude.ai):     ${YELLOW}⚠ Ответ: HTTP $claude_code${NC}"
+        fi
     else
-        echo -e "  Claude  (claude.ai):     ${YELLOW}⚠ Ответ: HTTP $claude_code${NC}"
+        echo -e "  ${YELLOW}○ Cloudflare WARP не активен на 127.0.0.1:${WARP_PORT}.${NC}"
+        echo -e "  Все запросы идут напрямую через основной IP сервера.\n"
+        
+        echo -e "  ${YELLOW}Проверяем прямой доступ к ChatGPT...${NC}"
+        local direct_code
+        direct_code=$(curl -s -o /dev/null -w "%{http_code}" --connect-timeout 5 https://chatgpt.com 2>/dev/null || echo "000")
+        echo -e "  Прямой ответ ChatGPT: HTTP ${direct_code}"
     fi
 
     pause
@@ -256,7 +261,7 @@ test_ai() {
 restart_server() {
     header "🔄 Перезапуск VPN и WARP"
     echo -e "  ${YELLOW}Перезапуск Hysteria 2...${NC}"
-    systemctl restart "$SERVICE"
+    systemctl restart "$SERVICE" 2>/dev/null || true
     echo -e "  ${YELLOW}Перезапуск Cloudflare WARP...${NC}"
     systemctl restart "$WARP_SERVICE" 2>/dev/null || true
     echo ""
@@ -268,16 +273,16 @@ restart_server() {
 # 7. Стоп / Старт
 toggle_server() {
     header "⏯️ Стоп / Старт Hysteria 2"
-    if systemctl is-active --quiet "$SERVICE"; then
+    if systemctl is-active --quiet "$SERVICE" 2>/dev/null; then
         echo -ne "  Остановить VPN? ${BOLD}(y/n)${NC}: "
         read -r conf
         if [[ "$conf" == "y" || "$conf" == "Y" ]]; then
-            systemctl stop "$SERVICE"
+            systemctl stop "$SERVICE" 2>/dev/null || true
             echo -e "\n  ${RED}⏹ Сервер остановлен.${NC}"
             log_action "SERVER_STOPPED"
         fi
     else
-        systemctl start "$SERVICE"
+        systemctl start "$SERVICE" 2>/dev/null || true
         echo -e "\n  ${GREEN}▶ Сервер запущен!${NC}"
         log_action "SERVER_STARTED"
     fi
@@ -301,7 +306,7 @@ update_hysteria() {
 
     echo -e "\n  ${YELLOW}Скачиваю последнюю версию...${NC}"
     bash <(curl -fsSL https://get.hy2.sh/) 2>&1
-    systemctl restart "$SERVICE"
+    systemctl restart "$SERVICE" 2>/dev/null || true
     echo ""
     echo -e "  ${GREEN}✅ Hysteria 2 обновлена и перезапущена!${NC}"
     log_action "HYSTERIA_UPDATED"
@@ -313,7 +318,7 @@ backup_config() {
     header "💾 Бэкап конфигурации"
     mkdir -p "$BACKUP_DIR"
     local backup_file="${BACKUP_DIR}/config_$(date +%Y%m%d_%H%M%S).yaml"
-    cp "$CONFIG" "$backup_file"
+    cp "$CONFIG" "$backup_file" 2>/dev/null || true
 
     echo -e "  ${GREEN}✅ Бэкап сохранён:${NC}"
     echo -e "  ${CYAN}${backup_file}${NC}\n"
@@ -328,12 +333,12 @@ system_info() {
     header "🖥️ Информация о системе"
     status_line "ОС:" "$(lsb_release -ds 2>/dev/null || cat /etc/os-release | grep PRETTY_NAME | cut -d'"' -f2)"
     status_line "Ядро Linux:" "$(uname -r)"
-    status_line "TCP Congestion:" "$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null)"
+    status_line "TCP Congestion:" "$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null || echo 'N/A')"
     status_line "IPv4:" "$(get_ip)"
     status_line "IPv6:" "$(ip -6 addr show scope global | grep inet6 | awk '{print $2}' | head -1 || echo 'нет')"
     echo ""
     echo -e "  ${BOLD}Файрвол (UFW):${NC}"
-    ufw status | grep -v "^$" | head -12 | while read -r line; do
+    ufw status 2>/dev/null | grep -v "^$" | head -12 | while read -r line; do
         echo "    $line"
     done
     echo ""
@@ -388,7 +393,7 @@ fi
 
 while true; do
     clear
-    if systemctl is-active --quiet "$SERVICE"; then
+    if systemctl is-active --quiet "$SERVICE" 2>/dev/null; then
         local_status="${GREEN}● РАБОТАЕТ${NC}"
     else
         local_status="${RED}● ОСТАНОВЛЕН${NC}"

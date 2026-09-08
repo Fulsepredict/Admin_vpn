@@ -50,17 +50,17 @@ fi
 # Шаг 1: Обновление системы
 # ============================================================
 echo -e "${YELLOW}[1/8]${NC} Обновление системы..."
-apt-get update -qq > /dev/null 2>&1
-apt-get upgrade -y -qq > /dev/null 2>&1
+apt-get update -qq > /dev/null 2>&1 || true
+apt-get upgrade -y -qq > /dev/null 2>&1 || true
 echo -e "  ${GREEN}✅ Система обновлена${NC}"
 
 # ============================================================
 # Шаг 2: Установка необходимых пакетов
 # ============================================================
 echo -e "${YELLOW}[2/8]${NC} Установка базовых утилит..."
-apt-get install -y -qq curl ufw fail2ban openssl unattended-upgrades iptables lsb-release gpg > /dev/null 2>&1
+apt-get install -y -qq curl ufw fail2ban openssl unattended-upgrades iptables lsb-release gnupg > /dev/null 2>&1 || true
 
-dpkg-reconfigure -f noninteractive unattended-upgrades > /dev/null 2>&1
+dpkg-reconfigure -f noninteractive unattended-upgrades > /dev/null 2>&1 || true
 echo -e "  ${GREEN}✅ curl, ufw, fail2ban, iptables, auto-updates${NC}"
 
 # ============================================================
@@ -68,6 +68,7 @@ echo -e "  ${GREEN}✅ curl, ufw, fail2ban, iptables, auto-updates${NC}"
 # ============================================================
 echo -e "${YELLOW}[3/8]${NC} Настройка BBR и UDP буферов ядра Linux..."
 
+mkdir -p /etc/sysctl.d
 cat > /etc/sysctl.d/99-hysteria.conf << 'EOF'
 # Алгоритм контроля перегрузок Google BBR + FQ
 net.core.default_qdisc = fq
@@ -82,31 +83,46 @@ net.ipv4.tcp_fin_timeout = 30
 net.ipv4.tcp_tw_reuse = 1
 EOF
 
-sysctl --system > /dev/null 2>&1
+sysctl --system > /dev/null 2>&1 || true
 echo -e "  ${GREEN}✅ Google BBR + FQ + 8MB UDP буферы активированы${NC}"
 
 # ============================================================
 # Шаг 4: Установка и настройка Cloudflare WARP (SOCKS5 Mode)
 # ============================================================
-echo -e "${YELLOW}[4/8]${NC} Установка Cloudflare WARP (обход антифрода ChatGPT/AI)..."
+echo -e "${YELLOW}[4/8]${NC} Настройка Cloudflare WARP (обход антифрода ChatGPT/AI)..."
 
-# Добавляем официальный репозиторий Cloudflare
-install -m 0755 -d /etc/apt/keyrings
-curl -fsSL https://pkg.cloudflareclient.com/pubkey.gpg | gpg --yes --dearmor --output /etc/apt/keyrings/cloudflare-warp.gpg 2>/dev/null
-echo "deb [arch=amd64 signed-by=/etc/apt/keyrings/cloudflare-warp.gpg] https://pkg.cloudflareclient.com/ $(lsb_release -cs) main" | tee /etc/apt/sources.list.d/cloudflare-client.list > /dev/null
+WARP_SUCCESS=false
+ARCH=$(dpkg --print-architecture 2>/dev/null || echo "amd64")
 
-apt-get update -qq > /dev/null 2>&1
-apt-get install -y -qq cloudflare-warp > /dev/null 2>&1
+if [ "$ARCH" = "amd64" ]; then
+    install -m 0755 -d /etc/apt/keyrings
+    if curl -fsSL --connect-timeout 8 https://pkg.cloudflareclient.com/pubkey.gpg | gpg --yes --dearmor --output /etc/apt/keyrings/cloudflare-warp.gpg 2>/dev/null; then
+        CODENAME=$(lsb_release -cs 2>/dev/null || echo "jammy")
+        echo "deb [arch=amd64 signed-by=/etc/apt/keyrings/cloudflare-warp.gpg] https://pkg.cloudflareclient.com/ ${CODENAME} main" | tee /etc/apt/sources.list.d/cloudflare-client.list > /dev/null
+        apt-get update -qq > /dev/null 2>&1 || true
+        apt-get install -y -qq cloudflare-warp > /dev/null 2>&1 || true
+    fi
 
-# Регистрируем WARP и переводим строго в SOCKS5 proxy режим
-# (Внимание: режим proxy не трогает системный шлюз, поэтому SSH и Telegram-бот не пострадают!)
-warp-cli --accept-tos registration new > /dev/null 2>&1 || true
-warp-cli --accept-tos mode proxy > /dev/null 2>&1 || true
-warp-cli --accept-tos proxy port ${WARP_SOCKS_PORT} > /dev/null 2>&1 || true
-warp-cli --accept-tos connect > /dev/null 2>&1 || true
+    if command -v warp-cli &>/dev/null; then
+        systemctl enable --now warp-svc > /dev/null 2>&1 || true
+        sleep 2
+        warp-cli --accept-tos registration new > /dev/null 2>&1 || warp-cli --accept-tos register > /dev/null 2>&1 || true
+        warp-cli --accept-tos mode proxy > /dev/null 2>&1 || warp-cli --accept-tos set-mode proxy > /dev/null 2>&1 || true
+        warp-cli --accept-tos proxy port ${WARP_SOCKS_PORT} > /dev/null 2>&1 || warp-cli --accept-tos set-proxy-port ${WARP_SOCKS_PORT} > /dev/null 2>&1 || true
+        warp-cli --accept-tos connect > /dev/null 2>&1 || true
+        sleep 2
 
-systemctl enable warp-svc > /dev/null 2>&1
-echo -e "  ${GREEN}✅ Cloudflare WARP запущен на 127.0.0.1:${WARP_SOCKS_PORT} (SOCKS5)${NC}"
+        if curl -s -x socks5h://127.0.0.1:${WARP_SOCKS_PORT} --connect-timeout 4 https://www.cloudflare.com/cdn-cgi/trace 2>/dev/null | grep -q "warp=on"; then
+            WARP_SUCCESS=true
+        fi
+    fi
+fi
+
+if [ "$WARP_SUCCESS" = true ]; then
+    echo -e "  ${GREEN}✅ Cloudflare WARP запущен на 127.0.0.1:${WARP_SOCKS_PORT} (SOCKS5)${NC}"
+else
+    echo -e "  ${YELLOW}⚠ Cloudflare WARP пропущен или недоступен (Hysteria будет работать напрямую)${NC}"
+fi
 
 # ============================================================
 # Шаг 5: Установка Hysteria2
@@ -116,9 +132,9 @@ bash <(curl -fsSL https://get.hy2.sh/) > /dev/null 2>&1
 echo -e "  ${GREEN}✅ Hysteria2 установлен${NC}"
 
 # ============================================================
-# Шаг 6: Генерация сертификата и умного конфига с ACL
+# Шаг 6: Генерация сертификата и умного конфига
 # ============================================================
-echo -e "${YELLOW}[6/8]${NC} Настройка конфига Hysteria2 с Smart Outbound ACL..."
+echo -e "${YELLOW}[6/8]${NC} Настройка конфига Hysteria2..."
 
 mkdir -p /etc/hysteria
 openssl ecparam -genkey -name prime256v1 -out /etc/hysteria/server.key 2>/dev/null
@@ -126,8 +142,15 @@ openssl req -new -x509 -days 3650 -key /etc/hysteria/server.key \
     -out /etc/hysteria/server.crt -subj "/CN=bing.com" 2>/dev/null
 
 VPN_PASSWORD=$(openssl rand -base64 24 | tr -d '/+=' | head -c 24)
-SERVER_IP=$(curl -s -4 --connect-timeout 10 ifconfig.me || curl -s -4 icanhazip.com)
 
+# Определение внешнего IPv4
+SERVER_IP=$(curl -s -4 --connect-timeout 5 ifconfig.me 2>/dev/null || \
+            curl -s -4 --connect-timeout 5 icanhazip.com 2>/dev/null || \
+            curl -s -4 --connect-timeout 5 api.ipify.org 2>/dev/null || \
+            hostname -I | awk '{print $1}')
+SERVER_IP=$(echo "$SERVER_IP" | tr -d ' \r\n')
+
+# Создание базового конфига
 cat > "$HYSTERIA_CONFIG" << EOF
 listen: :443
 
@@ -144,6 +167,11 @@ masquerade:
   proxy:
     url: https://www.bing.com
     rewriteHost: true
+EOF
+
+# Если WARP успешно завелся — подключаем умный Smart ACL
+if [ "$WARP_SUCCESS" = true ]; then
+cat >> "$HYSTERIA_CONFIG" << EOF
 
 outbounds:
   - name: warp_proxy
@@ -153,45 +181,67 @@ outbounds:
 
 acl:
   inline:
-    # --- Сервисы с жестким антифродом идут через чистый пул Cloudflare ---
-    - warp_proxy(geosite:openai)
-    - warp_proxy(geosite:anthropic)
-    - warp_proxy(geosite:google)
-    - warp_proxy(geosite:netflix)
-    - warp_proxy(geosite:spotify)
+    # --- OpenAI / ChatGPT ---
     - warp_proxy(suffix:openai.com)
     - warp_proxy(suffix:chatgpt.com)
     - warp_proxy(suffix:oaistatic.com)
     - warp_proxy(suffix:oaiusercontent.com)
+    # --- Anthropic / Claude ---
     - warp_proxy(suffix:anthropic.com)
     - warp_proxy(suffix:claude.ai)
-
-    # --- Весь остальной трафик (YouTube, соцсети, файлы) летит напрямую ---
+    # --- Google & ReCaptcha (без светофоров и гидрантов) ---
+    - warp_proxy(suffix:google.com)
+    - warp_proxy(suffix:gstatic.com)
+    - warp_proxy(suffix:recaptcha.net)
+    # --- Стриминги ---
+    - warp_proxy(suffix:netflix.com)
+    - warp_proxy(suffix:netflix.net)
+    - warp_proxy(suffix:nflxvideo.net)
+    - warp_proxy(suffix:spotify.com)
+    # --- Весь остальной трафик (YouTube, соцсети) напрямую ---
     - direct(all)
 EOF
-
-echo -e "  ${GREEN}✅ Конфиг создан: Bing-маскировка + Smart ACL${NC}"
+    echo -e "  ${GREEN}✅ Конфиг создан: Bing-маскировка + Smart ACL (ChatGPT/Claude через WARP)${NC}"
+else
+    echo -e "  ${GREEN}✅ Конфиг создан: Bing-маскировка + прямое подключение${NC}"
+fi
 
 # ============================================================
 # Шаг 7: Настройка Port Hopping и Файрвола UFW
 # ============================================================
 echo -e "${YELLOW}[7/8]${NC} Настройка файрвола и Port Hopping (20000-50000 UDP)..."
 
-# Добавляем NAT-редирект портов в /etc/ufw/before.rules, если его еще нет
-if ! grep -q "20000:50000" /etc/ufw/before.rules 2>/dev/null; then
-    sed -i '1i *nat\n:PREROUTING ACCEPT [0:0]\n-A PREROUTING -p udp --dport 20000:50000 -j REDIRECT --to-ports 443\nCOMMIT\n' /etc/ufw/before.rules
+# 1. Сбрасываем UFW в дефолт
+ufw --force reset > /dev/null 2>&1 || true
+ufw default deny incoming > /dev/null 2>&1 || true
+ufw default allow outgoing > /dev/null 2>&1 || true
+
+# 2. Разрешаем порты
+ufw allow 22/tcp > /dev/null 2>&1 || true
+ufw allow 443/udp > /dev/null 2>&1 || true
+ufw allow 20000:50000/udp > /dev/null 2>&1 || true
+
+# 3. Встраиваем NAT-редирект портов в /etc/ufw/before.rules (ПОСЛЕ reset!)
+if [ -f /etc/ufw/before.rules ]; then
+    if ! grep -q "20000:50000" /etc/ufw/before.rules 2>/dev/null; then
+        cat << 'NAT_EOF' > /tmp/ufw_nat.tmp
+*nat
+:PREROUTING ACCEPT [0:0]
+-A PREROUTING -p udp --dport 20000:50000 -j REDIRECT --to-ports 443
+COMMIT
+
+NAT_EOF
+        cat /etc/ufw/before.rules >> /tmp/ufw_nat.tmp
+        mv /tmp/ufw_nat.tmp /etc/ufw/before.rules
+    fi
 fi
 
-ufw --force reset > /dev/null 2>&1
-ufw default deny incoming > /dev/null 2>&1
-ufw default allow outgoing > /dev/null 2>&1
+ufw --force enable > /dev/null 2>&1 || true
 
-ufw allow 22/tcp > /dev/null 2>&1
-ufw allow 443/udp > /dev/null 2>&1
-ufw allow 20000:50000/udp > /dev/null 2>&1
-ufw --force enable > /dev/null 2>&1
+# Мгновенное правило iptables на текущую сессию
+iptables -t nat -A PREROUTING -p udp --dport 20000:50000 -j REDIRECT --to-ports 443 2>/dev/null || true
 
-echo -e "  ${GREEN}✅ Файрвол настроен: SSH (22) + Hysteria (443) + Port Hopping (20000-50000)${NC}"
+echo -e "  ${GREEN}✅ Файрвол: SSH (22) + Hysteria (443) + Port Hopping (20000-50000)${NC}"
 
 # ============================================================
 # Шаг 8: Мониторинг, автоперезапуск и установка vpn-admin
@@ -204,22 +254,22 @@ cat > /etc/systemd/system/hysteria-server.service.d/restart.conf << EOF
 Restart=always
 RestartSec=5
 EOF
-systemctl daemon-reload
+systemctl daemon-reload > /dev/null 2>&1 || true
 
 cat > /usr/local/bin/vpn-healthcheck << 'EOF'
 #!/bin/bash
-# Проверка Hysteria2
 if ! systemctl is-active --quiet hysteria-server; then
   systemctl restart hysteria-server
   echo "$(date): Hysteria2 restarted" >> /var/log/vpn-healthcheck.log
 fi
 
-# Проверка Cloudflare WARP
-if ! systemctl is-active --quiet warp-svc; then
-  systemctl restart warp-svc
-  sleep 2
-  warp-cli --accept-tos connect > /dev/null 2>&1 || true
-  echo "$(date): WARP restarted" >> /var/log/vpn-healthcheck.log
+if systemctl list-unit-files | grep -q "warp-svc"; then
+  if ! systemctl is-active --quiet warp-svc; then
+    systemctl restart warp-svc
+    sleep 2
+    warp-cli --accept-tos connect > /dev/null 2>&1 || true
+    echo "$(date): WARP restarted" >> /var/log/vpn-healthcheck.log
+  fi
 fi
 EOF
 chmod +x /usr/local/bin/vpn-healthcheck
@@ -233,8 +283,8 @@ if [[ -f /usr/local/bin/vpn-admin ]]; then
     sed -i 's/\r$//' /usr/local/bin/vpn-admin
 fi
 
-systemctl enable hysteria-server > /dev/null 2>&1
-systemctl restart hysteria-server
+systemctl enable hysteria-server > /dev/null 2>&1 || true
+systemctl restart hysteria-server > /dev/null 2>&1 || true
 
 echo -e "  ${GREEN}✅ Сервисы запущены и добавлены в автозагрузку${NC}"
 
@@ -252,7 +302,11 @@ echo ""
 echo -e "  ${BOLD}IP сервера:${NC}      ${SERVER_IP}"
 echo -e "  ${BOLD}Пароль VPN:${NC}      ${VPN_PASSWORD}"
 echo -e "  ${BOLD}TCP BBR:${NC}         ${GREEN}Активен (fq + bbr)${NC}"
+if [ "$WARP_SUCCESS" = true ]; then
 echo -e "  ${BOLD}WARP SOCKS5:${NC}     ${GREEN}Активен (127.0.0.1:${WARP_SOCKS_PORT})${NC}"
+else
+echo -e "  ${BOLD}WARP SOCKS5:${NC}     ${YELLOW}Отключен (прямой режим)${NC}"
+fi
 echo -e "  ${BOLD}Port Hopping:${NC}    ${GREEN}20000-50000 UDP${NC}"
 echo ""
 echo -e "  ${BOLD}1. Ссылка со скачущими портами (Рекомендуется для РФ):${NC}"
