@@ -40,19 +40,27 @@ if [[ $EUID -ne 0 ]]; then
     exit 1
 fi
 
+export DEBIAN_FRONTEND=noninteractive
+export NEEDRESTART_MODE=a
+
 # --- Проверяем ОС ---
 if ! command -v apt &> /dev/null; then
     echo -e "${RED}❌ Поддерживается только Ubuntu/Debian${NC}"
     exit 1
 fi
 
+# Ждем освобождения apt-lock, если сервер только что загрузился
+while fuser /var/lib/dpkg/lock-frontend >/dev/null 2>&1 || fuser /var/lib/apt/lists/lock >/dev/null 2>&1; do
+    echo -e "  ${DIM}Ожидаем завершения инициализации сервера...${NC}"
+    sleep 3
+done
+
 # ============================================================
-# Шаг 1: Обновление системы
+# Шаг 1: Обновление списков пакетов
 # ============================================================
-echo -e "${YELLOW}[1/8]${NC} Обновление системы..."
+echo -e "${YELLOW}[1/8]${NC} Обновление списков пакетов..."
 apt-get update -qq > /dev/null 2>&1 || true
-apt-get upgrade -y -qq > /dev/null 2>&1 || true
-echo -e "  ${GREEN}✅ Система обновлена${NC}"
+echo -e "  ${GREEN}✅ Списки пакетов обновлены${NC}"
 
 # ============================================================
 # Шаг 2: Установка необходимых пакетов
