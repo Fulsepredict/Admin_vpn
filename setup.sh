@@ -213,6 +213,11 @@ else
     echo -e "  ${GREEN}✅ Конфиг создан: Bing-маскировка + прямое подключение${NC}"
 fi
 
+# Выставляем права доступа, чтобы служба hysteria (не root) могла читать ключи и конфиг
+chmod 755 /etc/hysteria
+chmod 644 /etc/hysteria/server.crt /etc/hysteria/server.key "$HYSTERIA_CONFIG"
+chown -R hysteria:hysteria /etc/hysteria 2>/dev/null || true
+
 # ============================================================
 # Шаг 7: Настройка Port Hopping и Файрвола UFW
 # ============================================================
