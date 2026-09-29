@@ -56,7 +56,9 @@ def test_audit():
         assert parsed_full["outbounds"][0]["socks5"]["addr"] == "127.0.0.1:40000"
         assert "acl" in parsed_full, "acl missing"
         assert len(parsed_full["acl"]["inline"]) > 5, "ACL inline rules empty"
-        print(f"[OK] Extended Smart ACL YAML is 100% valid ({len(parsed_full['acl']['inline'])} rules).")
+        assert any("instagram.com" in r for r in parsed_full["acl"]["inline"]), "Instagram missing in ACL"
+        assert any("facebook.com" in r for r in parsed_full["acl"]["inline"]), "Facebook missing in ACL"
+        print(f"[OK] Extended Smart ACL YAML is 100% valid ({len(parsed_full['acl']['inline'])} rules, Meta/Instagram included).")
     except Exception as e:
         print(f"[FAIL] Extended YAML invalid: {e}")
         return False

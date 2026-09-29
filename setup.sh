@@ -188,6 +188,15 @@ outbounds:
 
 acl:
   inline:
+    # --- Instagram & Meta Ecosystem (Zero-Detect для Reels/алгоритмов) ---
+    - warp_proxy(suffix:instagram.com)
+    - warp_proxy(suffix:cdninstagram.com)
+    - warp_proxy(suffix:ig.me)
+    - warp_proxy(suffix:facebook.com)
+    - warp_proxy(suffix:fbcdn.net)
+    - warp_proxy(suffix:fbsbx.com)
+    - warp_proxy(suffix:meta.com)
+    - warp_proxy(suffix:threads.net)
     # --- OpenAI / ChatGPT ---
     - warp_proxy(suffix:openai.com)
     - warp_proxy(suffix:chatgpt.com)
@@ -205,10 +214,10 @@ acl:
     - warp_proxy(suffix:netflix.net)
     - warp_proxy(suffix:nflxvideo.net)
     - warp_proxy(suffix:spotify.com)
-    # --- Весь остальной трафик (YouTube, соцсети) напрямую ---
+    # --- Весь остальной трафик (YouTube и др.) напрямую ---
     - direct(all)
 EOF
-    echo -e "  ${GREEN}✅ Конфиг создан: Bing-маскировка + Smart ACL (ChatGPT/Claude через WARP)${NC}"
+    echo -e "  ${GREEN}✅ Конфиг создан: Bing-маскировка + Smart ACL (Instagram/ChatGPT/Claude через WARP)${NC}"
 else
     echo -e "  ${GREEN}✅ Конфиг создан: Bing-маскировка + прямое подключение${NC}"
 fi

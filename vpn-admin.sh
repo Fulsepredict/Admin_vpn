@@ -228,21 +228,29 @@ test_ai() {
         echo -e "  ${GREEN}✅ Cloudflare WARP работает идеально!${NC}"
         echo -e "  Выходной IP для ИИ: ${CYAN}${warp_ip}${NC} (Страна: ${warp_loc})\n"
 
-        echo -e "  ${YELLOW}Проверяем доступность доменов OpenAI & Claude через WARP...${NC}"
+        echo -e "  ${YELLOW}Проверяем доступность доменов OpenAI, Claude & Instagram через WARP...${NC}"
         local chatgpt_code
         chatgpt_code=$(curl -s -o /dev/null -w "%{http_code}" -x socks5h://127.0.0.1:${WARP_PORT} --connect-timeout 6 https://chatgpt.com 2>/dev/null || echo "000")
         if [[ "$chatgpt_code" == "200" || "$chatgpt_code" == "301" || "$chatgpt_code" == "302" || "$chatgpt_code" == "403" ]]; then
-            echo -e "  ChatGPT (chatgpt.com):   ${GREEN}✅ Доступен (HTTP $chatgpt_code)${NC}"
+            echo -e "  ChatGPT   (chatgpt.com):   ${GREEN}✅ Доступен (HTTP $chatgpt_code)${NC}"
         else
-            echo -e "  ChatGPT (chatgpt.com):   ${YELLOW}⚠ Ответ: HTTP $chatgpt_code${NC}"
+            echo -e "  ChatGPT   (chatgpt.com):   ${YELLOW}⚠ Ответ: HTTP $chatgpt_code${NC}"
         fi
 
         local claude_code
         claude_code=$(curl -s -o /dev/null -w "%{http_code}" -x socks5h://127.0.0.1:${WARP_PORT} --connect-timeout 6 https://claude.ai 2>/dev/null || echo "000")
         if [[ "$claude_code" == "200" || "$claude_code" == "301" || "$claude_code" == "302" ]]; then
-            echo -e "  Claude  (claude.ai):     ${GREEN}✅ Доступен (HTTP $claude_code)${NC}"
+            echo -e "  Claude    (claude.ai):     ${GREEN}✅ Доступен (HTTP $claude_code)${NC}"
         else
-            echo -e "  Claude  (claude.ai):     ${YELLOW}⚠ Ответ: HTTP $claude_code${NC}"
+            echo -e "  Claude    (claude.ai):     ${YELLOW}⚠ Ответ: HTTP $claude_code${NC}"
+        fi
+
+        local insta_code
+        insta_code=$(curl -s -o /dev/null -w "%{http_code}" -x socks5h://127.0.0.1:${WARP_PORT} --connect-timeout 6 https://www.instagram.com 2>/dev/null || echo "000")
+        if [[ "$insta_code" == "200" || "$insta_code" == "301" || "$insta_code" == "302" ]]; then
+            echo -e "  Instagram (instagram.com): ${GREEN}✅ Доступен через WARP (HTTP $insta_code)${NC}"
+        else
+            echo -e "  Instagram (instagram.com): ${YELLOW}⚠ Ответ: HTTP $insta_code${NC}"
         fi
     else
         echo -e "  ${YELLOW}○ Cloudflare WARP не активен на 127.0.0.1:${WARP_PORT}.${NC}"
@@ -409,7 +417,7 @@ while true; do
     echo -e "${CYAN}  ║${NC}   ${BOLD}2${NC} │ 📋  Логи Hysteria 2                ${CYAN}║${NC}"
     echo -e "${CYAN}  ║${NC}   ${BOLD}3${NC} │ 🔑  Сменить пароль                 ${CYAN}║${NC}"
     echo -e "${CYAN}  ║${NC}   ${BOLD}4${NC} │ 🔗  Показать ссылки (Port Hopping) ${CYAN}║${NC}"
-    echo -e "${CYAN}  ║${NC}   ${BOLD}5${NC} │ 🧪  Тест обхода антифрода (ИИ)     ${CYAN}║${NC}"
+    echo -e "${CYAN}  ║${NC}   ${BOLD}5${NC} │ 🧪  Тест обхода антифрода (ИИ & Meta)      ${CYAN}║${NC}"
     echo -e "${CYAN}  ║${NC}   ${BOLD}6${NC} │ 🔄  Перезапуск сервисов            ${CYAN}║${NC}"
     echo -e "${CYAN}  ║${NC}   ${BOLD}7${NC} │ ⏯️   Стоп / Старт                   ${CYAN}║${NC}"
     echo -e "${CYAN}  ║${NC}   ${BOLD}8${NC} │ ⬆️   Обновить Hysteria 2            ${CYAN}║${NC}"
