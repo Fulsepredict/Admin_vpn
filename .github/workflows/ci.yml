@@ -27,7 +27,15 @@ jobs:
       - name: Install tools
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y -qq shellcheck python3-yaml
+          sudo apt-get install -y -qq python3-yaml
+          # Закреплённая версия ShellCheck: в apt Ubuntu более старая версия,
+          # у неё другие коды предупреждений — результаты расходились бы с локальными
+          curl -fsSL "https://github.com/koalaman/shellcheck/releases/download/${SHELLCHECK_VERSION}/shellcheck-${SHELLCHECK_VERSION}.linux.x86_64.tar.xz" \
+            | tar -xJ -C /tmp
+          sudo install -m 755 "/tmp/shellcheck-${SHELLCHECK_VERSION}/shellcheck" /usr/local/bin/shellcheck
+          shellcheck --version
+        env:
+          SHELLCHECK_VERSION: v0.11.0
 
       - name: ShellCheck
         run: shellcheck -x -S style setup.sh vpn-admin.sh install.sh tests/integration.sh
