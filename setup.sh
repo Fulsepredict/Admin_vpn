@@ -269,13 +269,15 @@ detect_ssh_ports() {
     if [[ -n "${SSH_CONNECTION:-}" ]]; then
         ports+=" ${SSH_CONNECTION##* }"
     fi
-    # 2) Итоговая конфигурация sshd
+    # 2) Итоговая конфигурация sshd.
+    # «|| true» обязателен: при set -e + pipefail сбой sshd -T (ошибка в его
+    # конфиге, нет прав, нет ключей хоста) иначе молча оборвал бы весь установщик.
     if command -v sshd >/dev/null 2>&1; then
-        ports+=" $(sshd -T 2>/dev/null | awk '$1 == "port" { print $2 }' | tr '\n' ' ')"
+        ports+=" $(sshd -T 2>/dev/null | awk '$1 == "port" { print $2 }' | tr '\n' ' ' || true)"
     fi
     # 3) Что реально слушает sshd
     if command -v ss >/dev/null 2>&1; then
-        ports+=" $(ss -Htlnp 2>/dev/null | awk '/"sshd"/ { n = split($4, a, ":"); print a[n] }' | tr '\n' ' ')"
+        ports+=" $(ss -Htlnp 2>/dev/null | awk '/"sshd"/ { n = split($4, a, ":"); print a[n] }' | tr '\n' ' ' || true)"
     fi
 
     local result="" port
@@ -454,7 +456,7 @@ install_hysteria() {
     rm -f "$installer"
 
     local version
-    version=$(hysteria version 2>/dev/null | awk '/^Version:/ { print $2 }' | sed 's/^v//')
+    version=$(hysteria version 2>/dev/null | awk '/^Version:/ { print $2 }' | sed 's/^v//' || true)
     if [[ -z "$version" ]]; then
         warn "Не удалось определить версию Hysteria2"
     elif ! version_ge "$version" "$MIN_HYSTERIA_VERSION"; then

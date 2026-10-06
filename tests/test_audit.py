@@ -567,6 +567,29 @@ def detect_ssh_ports_uses_current_session_port():
 
 
 @test
+def detect_ssh_ports_survives_failing_sshd():
+    # Регрессия из CI: при set -e + pipefail сбой «sshd -T» молча обрывал установщик.
+    # Подкладываем в PATH поддельный sshd, который всегда падает.
+    tmp = tempfile.mkdtemp()
+    try:
+        fake = Path(tmp) / "sshd"
+        fake.write_text("#!/bin/bash\nexit 1\n", encoding="utf-8", newline="\n")
+        fake.chmod(0o755)
+        fake_dir = to_bash_path(tmp)
+        if os.name == "nt":  # В PATH нельзя «C:/...» (двоеточие — разделитель), нужно «/c/...»
+            fake_dir = "/" + fake_dir[0].lower() + fake_dir[2:]
+        # Вызов напрямую, а не через $(...): внутри $(...) bash отключает set -e,
+        # и баг бы не воспроизвёлся
+        script = (f'PATH="{fake_dir}:$PATH"; '
+                  'detect_ssh_ports; echo "AFTER_OK"')
+        out = bash(script, source=SETUP, env={"SSH_CONNECTION": "198.51.100.1 50000 203.0.113.7 2222"}).stdout
+        assert "AFTER_OK" in out, "detect_ssh_ports оборвал скрипт при сбое sshd"
+        assert "2222" in out.split()
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+@test
 def installer_has_no_dangerous_operations():
     setup = read_text(SETUP)
     for forbidden in ("ufw --force reset", "killall", "rm -f /var/lib/dpkg/lock",
