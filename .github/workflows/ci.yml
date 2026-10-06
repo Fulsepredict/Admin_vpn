@@ -1,0 +1,64 @@
+# Автоматическая проверка каждого изменения.
+# 1) lint-and-unit — ShellCheck + юнит-тесты (быстро, без изменения системы).
+# 2) integration   — настоящая установка на чистой Ubuntu в одноразовой
+#    виртуалке GitHub: setup.sh, затем tests/integration.sh (туннель, WARP,
+#    sniffing, автооткат, upgrade, повторный запуск).
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+# Минимальные права: workflow только читает код
+permissions:
+  contents: read
+
+jobs:
+  lint-and-unit:
+    name: ShellCheck + unit tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install tools
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq shellcheck python3-yaml
+
+      - name: ShellCheck
+        run: shellcheck -x -S style setup.sh vpn-admin.sh install.sh tests/integration.sh
+
+      - name: Unit tests
+        run: python3 tests/test_audit.py
+
+  integration:
+    name: Integration (real install on Ubuntu 24.04)
+    needs: lint-and-unit
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install test dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq python3-yaml
+
+      # VPN_ADMIN_SOURCE_FILE: ставим vpn-admin из этого коммита, а не с GitHub,
+      # чтобы проверялся именно тот код, который сейчас в ревью
+      - name: Run setup.sh
+        run: sudo VPN_ADMIN_SOURCE_FILE="$PWD/vpn-admin.sh" bash setup.sh
+
+      - name: Integration tests
+        run: sudo VPN_ADMIN_SOURCE_FILE="$PWD/vpn-admin.sh" bash tests/integration.sh
+
+      - name: Diagnostics on failure
+        if: failure()
+        run: |
+          sudo tail -n 150 /var/log/vpn-setup.log || true
+          sudo journalctl -u hysteria-server -n 100 --no-pager || true
+          sudo ufw status verbose || true
+          sudo iptables -t nat -S || true
