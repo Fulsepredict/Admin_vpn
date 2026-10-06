@@ -6,8 +6,9 @@
 name: CI
 
 on:
+  # Любая ветка: изменения проверяются ДО попадания в main,
+  # ведь ссылки установки (raw.githubusercontent.com/.../main/...) берут код прямо из main
   push:
-    branches: [main]
   pull_request:
   workflow_dispatch:
 
