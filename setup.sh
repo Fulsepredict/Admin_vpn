@@ -2,11 +2,13 @@
 # ============================================================
 # 🚀 VPN Server Quick Setup (Enterprise Edition)
 # Автоматическая установка Hysteria2 VPN:
-# - BBR + FQ тюнинг ядра, UDP-буферы 8MB
-# - Cloudflare WARP SOCKS5 + Smart ACL (Instagram/Meta, ChatGPT, Claude, Google/Gemini)
-# - Protocol sniffing: ACL работает и для клиентов в TUN-режиме
+# - BBR + FQ тюнинг ядра, UDP-буферы 8MB, оптимизация nf_conntrack
+# - Адаптация под мобильные сети 4G/5G РФ (ignoreClientBandwidth, MTU, SNI)
+# - Cloudflare WARP SOCKS5 + Smart ACL (Instagram/Meta, ChatGPT, Claude, Google/Antigravity)
+# - Блокировка UDP 443 в ACL (принудительный TCP 443 для стабильной работы через SOCKS5 WARP)
+# - Protocol sniffing (rewriteDomain: true): ACL работает и для клиентов в TUN-режиме
 # - Port Hopping 20000-50000 (защита от глушилок провайдеров)
-# - UFW (без сброса чужих правил) + Fail2ban + healthcheck WARP
+# - UFW (без сброса чужих правил) + Fail2ban + бережный healthcheck WARP
 # - Повторный запуск безопасен: пароль и сертификат сохраняются
 # GitHub: https://github.com/Fulsepredict/Admin_vpn
 # ============================================================
@@ -45,10 +47,20 @@ CERT_DAYS=3650
 CERT_CN="bing.com"
 MASQUERADE_URL="https://www.bing.com"
 SNIFF_TIMEOUT="2s"
+QUIC_IDLE_TIMEOUT="60s"
 # Серверный sniffing появился в 2.5.0, его баги (HTTP на нестандартных портах,
 # фрагментированный QUIC) исправлены в 2.5.1–2.5.2. Старее — не поддерживаем.
 MIN_HYSTERIA_VERSION="2.5.2"
 TOTAL_STEPS=8
+
+# Домены экосистемы Google / Gemini / Antigravity.
+# ВАЖНО: список должен совпадать с GOOGLE_DOMAINS в vpn-admin.sh.
+GOOGLE_DOMAINS=(
+    google.com googleapis.com googleusercontent.com gstatic.com recaptcha.net
+    antigravity.google deepmind.google labs.google ai.google notebooklm.google blog.google
+    pki.goog dns.google withgoogle.com ggpht.com 1e100.net gvt1.com gvt2.com gvt3.com
+    ai.google.dev idx.dev appspot.com run.app cloudfunctions.net firebaseapp.com web.app
+)
 
 # Домены, которые идут через Cloudflare WARP (остальное — напрямую).
 # ВАЖНО: такой же список RECOMMENDED_WARP_DOMAINS есть в vpn-admin.sh —
@@ -63,7 +75,7 @@ WARP_DOMAINS=(
     # Anthropic / Claude
     anthropic.com claude.ai claude.com
     # Google, Gemini, Antigravity, ReCaptcha
-    google.com googleapis.com googleusercontent.com gstatic.com recaptcha.net
+    "${GOOGLE_DOMAINS[@]}"
     # Стриминги
     netflix.com netflix.net nflxvideo.net spotify.com
 )
@@ -154,13 +166,14 @@ cert_pin() {
 
 # Ссылки для клиентов в формате "метка<TAB>ссылка".
 # ВАЖНО: функция продублирована в vpn-admin.sh — тест проверяет идентичность вывода.
+# Параметр sni=bing.com обязателен для мобильных сетей РФ (ТСПУ режет QUIC без SNI).
 #  porthop  — port hopping через параметр mport (NekoBox, v2rayN, 3x-ui-совместимые)
-#  standard — только порт 443
+#  standard — только порт 443 (рекомендуется для мобильных сетей 4G/5G, если режут высокие UDP-порты)
 #  nopin    — port hopping без pinSHA256 (если клиент не понимает закрепление)
 #  official — официальная схема Hysteria: диапазон портов прямо в адресе
 build_links() {
     local ip="$1" password="$2" pin="$3"
-    local base="insecure=1&alpn=h3"
+    local base="insecure=1&sni=${CERT_CN}&alpn=h3"
     local pinned="$base"
     [[ -n "$pin" ]] && pinned="${base}&pinSHA256=${pin}"
     local ports="${LISTEN_PORT},${HOP_PORT_START}-${HOP_PORT_END}"
@@ -171,7 +184,28 @@ build_links() {
     printf 'official\thysteria2://%s@%s:%s/?%s#Hysteria2-Official\n' "$password" "$ip" "$ports" "$pinned"
 }
 
+# Блок оптимизации QUIC для мобильных сетей 4G/5G и высокого пинга (США <-> РФ).
+# ВАЖНО: продублирован в vpn-admin.sh (quic_block) — тест сверяет.
+# - ignoreClientBandwidth: true отключает агрессивный Brutal в пользу адаптивного BBR.
+# - disablePathMTUDiscovery: true защищает от отбрасывания крупных UDP-пакетов на вышках 5G/LTE.
+quic_block() {
+    cat <<EOF
+ignoreClientBandwidth: true
+
+quic:
+  initStreamReceiveWindow: 8388608
+  maxStreamReceiveWindow: 8388608
+  initConnReceiveWindow: 20971520
+  maxConnReceiveWindow: 20971520
+  maxIdleTimeout: ${QUIC_IDLE_TIMEOUT}
+  maxIncomingStreams: 1024
+  disablePathMTUDiscovery: true
+EOF
+}
+
 # Блок sniffing. ВАЖНО: продублирован в vpn-admin.sh (sniff_block) — тест сверяет.
+# rewriteDomain: true передаёт в исходящий прокси распознанное доменное имя,
+# а не сырой IP от локального DNS клиента в TUN-режиме.
 sniff_block() {
     cat <<EOF
 # Sniffing: сервер достаёт имя сайта из TLS SNI / HTTP Host / QUIC.
@@ -180,7 +214,7 @@ sniff_block() {
 sniff:
   enable: true
   timeout: ${SNIFF_TIMEOUT}
-  rewriteDomain: false
+  rewriteDomain: true
   tcpPorts: 80,443
   udpPorts: 443
 EOF
@@ -226,6 +260,10 @@ auth:
   type: password
   password: ${password}
 
+EOF
+    quic_block
+    cat <<EOF
+
 masquerade:
   type: proxy
   proxy:
@@ -243,9 +281,20 @@ outbounds:
     type: socks5
     socks5:
       addr: 127.0.0.1:${WARP_SOCKS_PORT}
+  - name: direct
+    type: direct
+    direct:
+      mode: 46
 
 acl:
   inline:
+    # Блокируем внешний QUIC (UDP 443): локальный SOCKS5 warp-svc работает только по TCP,
+    # поэтому браузеры и Antigravity за 1 мс переключаются на стабильный TCP 443 (HTTP/2).
+    - reject(all, udp/443)
+    # Российские домены всегда идут напрямую мимо WARP
+    - direct(suffix:ru)
+    - direct(suffix:su)
+    - direct(suffix:xn--p1ai)
 EOF
         local domain
         for domain in "${WARP_DOMAINS[@]}"; do
@@ -365,24 +414,33 @@ install_packages() {
 }
 
 tune_kernel() {
-    step 3 "Настройка BBR и UDP-буферов ядра Linux..."
+    step 3 "Настройка BBR, UDP-буферов и nf_conntrack ядра Linux..."
+    # Подгружаем nf_conntrack заранее, чтобы параметры таблицы соединений применились сразу
+    modprobe nf_conntrack 2>/dev/null || true
     mkdir -p /etc/sysctl.d
     cat > /etc/sysctl.d/99-hysteria.conf <<'EOF'
 # Алгоритм контроля перегрузок Google BBR + FQ
 net.core.default_qdisc = fq
 net.ipv4.tcp_congestion_control = bbr
 
-# Буферы UDP 8MB (убирают дропы пакетов на высоких скоростях)
+# Буферы UDP 8MB (убирают дропы пакетов на высоких скоростях и большом RTT)
 net.core.rmem_max = 8388608
 net.core.wmem_max = 8388608
+net.core.rmem_default = 2097152
+net.core.wmem_default = 2097152
 
-# Быстрая очистка закрытых соединений
+# Быстрая очистка UDP-сессий при Port Hopping (префикс "-" безопасен для контейнеров)
+-net.netfilter.nf_conntrack_max = 262144
+-net.netfilter.nf_conntrack_udp_timeout = 30
+-net.netfilter.nf_conntrack_udp_timeout_stream = 60
+
+# Быстрая очистка закрытых TCP-соединений
 net.ipv4.tcp_fin_timeout = 30
 net.ipv4.tcp_tw_reuse = 1
 EOF
     run_logged sysctl --system || warn "sysctl --system вернул ошибку"
     if [[ "$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null || true)" == "bbr" ]]; then
-        ok "BBR + FQ + UDP-буферы 8MB активированы"
+        ok "BBR + FQ + UDP-буферы 8MB + оптимизация nf_conntrack активированы"
     else
         warn "BBR не включился (ядро без модуля tcp_bbr?) — VPN будет работать, но медленнее"
     fi
@@ -535,12 +593,12 @@ write_config() {
     secure_permissions
 
     if [[ "$WARP_ENABLED" == true ]]; then
-        ok "Конфиг: Bing-маскировка + sniffing + Smart ACL (${#WARP_DOMAINS[@]} доменов через WARP)"
+        ok "Конфиг: 5G QUIC тюнинг + sniffing + Smart ACL (${#WARP_DOMAINS[@]} доменов через WARP)"
         if (( ${#custom_domains[@]} > 0 )); then
             ok "Сохранены домены, добавленные вручную: ${custom_domains[*]}"
         fi
     else
-        ok "Конфиг: Bing-маскировка + прямое подключение"
+        ok "Конфиг: 5G QUIC тюнинг + Bing-маскировка + прямое подключение"
     fi
 }
 
@@ -699,16 +757,16 @@ print_summary() {
     echo -e "  ${BOLD}IP сервера:${NC}      ${server_ip}"
     echo -e "  ${BOLD}Пароль VPN:${NC}      ${VPN_PASSWORD}"
     if [[ "$WARP_ENABLED" == true ]]; then
-        echo -e "  ${BOLD}WARP + ACL:${NC}      ${GREEN}Активен (${#WARP_DOMAINS[@]} доменов, sniffing включён)${NC}"
+        echo -e "  ${BOLD}WARP + ACL:${NC}      ${GREEN}Активен (${#WARP_DOMAINS[@]} доменов, sniffing + анти-QUIC включены)${NC}"
     else
         echo -e "  ${BOLD}WARP + ACL:${NC}      ${YELLOW}Отключен (прямой режим)${NC}"
     fi
     echo -e "  ${BOLD}Port Hopping:${NC}    ${GREEN}${HOP_PORT_START}-${HOP_PORT_END} UDP${NC}"
     echo ""
-    echo -e "  ${BOLD}1. Рекомендуемая ссылка (port hopping + закреплённый сертификат):${NC}"
+    echo -e "  ${BOLD}1. Рекомендуемая ссылка (port hopping + sni + закреплённый сертификат):${NC}"
     echo -e "  ${CYAN}${porthop}${NC}"
     echo ""
-    echo -e "  ${BOLD}2. Стандартная ссылка (порт ${LISTEN_PORT}):${NC}"
+    echo -e "  ${BOLD}2. Стандартная ссылка (порт ${LISTEN_PORT}, лучше для мобильных сетей 4G/5G):${NC}"
     echo -e "  ${DIM}${standard}${NC}"
     echo ""
     echo -e "  ${BOLD}3. Если клиент не подключается по ссылкам 1–2 (без pinSHA256):${NC}"
@@ -718,9 +776,10 @@ print_summary() {
     echo -e "  ${DIM}Клиенты: NekoBox / v2rayN / Hiddify / Streisand / Shadowrocket${NC}"
     echo ""
     echo -e "  ${BOLD}Управление:${NC}"
-    echo -e "  ${DIM}vpn-admin${NC}          — интерактивное меню"
-    echo -e "  ${DIM}vpn-admin status${NC}   — статус сервисов, WARP и sniffing"
-    echo -e "  ${DIM}vpn-admin test-ai${NC}  — проверить доступность ChatGPT/Claude/Instagram"
+    echo -e "  ${DIM}vpn-admin${NC}                   — интерактивное меню"
+    echo -e "  ${DIM}vpn-admin status${NC}            — статус сервисов, WARP и sniffing"
+    echo -e "  ${DIM}vpn-admin google-mode direct${NC} — пустить Google/Antigravity напрямую (для VPS в США)"
+    echo -e "  ${DIM}vpn-admin ru-bypass${NC}         — настройка обхода для Сбербанка, Яндекса и сайтов РФ"
     echo ""
     echo -e "  ${DIM}Лог установки: ${SETUP_LOG}${NC}"
     echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
@@ -731,7 +790,7 @@ main() {
     echo ""
     echo -e "${CYAN}╔══════════════════════════════════════════════════════╗${NC}"
     echo -e "${CYAN}║${NC}  ${BOLD}🚀 VPN Server Quick Setup (Enterprise Edition)${NC}       ${CYAN}║${NC}"
-    echo -e "${CYAN}║${NC}  ${DIM}Hysteria2 + BBR + WARP SOCKS5 + Port Hopping${NC}         ${CYAN}║${NC}"
+    echo -e "${CYAN}║${NC}  ${DIM}Hysteria2 + BBR + 5G Tune + WARP SOCKS5 + Sniffing${NC}   ${CYAN}║${NC}"
     echo -e "${CYAN}╚══════════════════════════════════════════════════════╝${NC}"
     echo ""
 

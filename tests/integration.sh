@@ -246,6 +246,7 @@ t_check "hysteria-server в автозагрузке" systemctl is-enabled --qui
 [[ "$(file_mode_owner /etc/hysteria/server.key)" == "640 root:hysteria" ]] \
     && t_ok "server.key: 640 root:hysteria" || t_fail "server.key: $(file_mode_owner /etc/hysteria/server.key)"
 t_check "config.yaml — валидный YAML без дублей в ACL" yaml_is_valid_without_duplicates
+t_check "5G QUIC тюнинг включён в config.yaml" config_has_quic_tuning "$CONFIG"
 t_check "vpn-admin установлен" test -x /usr/local/bin/vpn-admin
 t_check "vpn-healthcheck установлен" test -x /usr/local/bin/vpn-healthcheck
 CRON_LINES=$(crontab -l 2>/dev/null | grep -c 'vpn-healthcheck' || true)
@@ -265,9 +266,12 @@ t_section "2. WARP и Smart ACL"
 
 if config_has_acl "$CONFIG"; then
     t_check "sniffing включён в конфиге" sniff_is_enabled "$CONFIG"
+    t_check "rewriteDomain включён в sniffing" sniff_rewrite_is_enabled "$CONFIG"
+    t_check "блокировка внешнего UDP 443 в ACL" config_has_udp443_reject "$CONFIG"
+    t_check "прямые правила для .ru / .su / .рф в ACL" config_has_ru_direct_rules "$CONFIG"
     MISSING=""
     for domain in "${RECOMMENDED_WARP_DOMAINS[@]}"; do
-        acl_has_domain "$CONFIG" "$domain" || MISSING+=" ${domain}"
+        acl_has_domain_configured "$CONFIG" "$domain" || MISSING+=" ${domain}"
     done
     [[ -z "$MISSING" ]] && t_ok "все ${#RECOMMENDED_WARP_DOMAINS[@]} рекомендуемых доменов в ACL" \
         || t_fail "в ACL нет доменов:${MISSING}"
@@ -278,7 +282,7 @@ if config_has_acl "$CONFIG"; then
         t_fail "ACL включён, но WARP не отвечает (warp=on не получен)"
     fi
 else
-    t_skip "setup.sh не смог включить WARP на раннере — тесты WARP/ACL пропущены"
+    t_skip "setup.sh не смог включить WARP на раннере — тесты WARP/ACL пропущена"
     if grep -q '^sniff:' "$CONFIG"; then
         t_fail "sniff без ACL не нужен"
     else
@@ -294,16 +298,22 @@ PIN=$(cert_pin "$CERT_FILE")
 [[ "$PIN" =~ ^[0-9a-f]{64}$ ]] && t_ok "pinSHA256 сертификата: ${PIN:0:16}…" || t_fail "некорректный pin: ${PIN}"
 
 LINK_OUT=$(vpn-admin link 2>&1)
-[[ "$LINK_OUT" == *"pinSHA256=${PIN}"* ]] && t_ok "vpn-admin link: ссылки содержат правильный pinSHA256" \
-    || t_fail "vpn-admin link: нет pinSHA256=${PIN}"
+[[ "$LINK_OUT" == *"pinSHA256=${PIN}"* && "$LINK_OUT" == *"sni=${CERT_CN}"* ]] \
+    && t_ok "vpn-admin link: ссылки содержат правильный pinSHA256 и sni=${CERT_CN}" \
+    || t_fail "vpn-admin link: нет pinSHA256=${PIN} или sni=${CERT_CN}"
 [[ "$LINK_OUT" == *"hysteria2://"* && "$LINK_OUT" == *"mport=443,20000-50000"* ]] \
     && t_ok "vpn-admin link: есть официальная ссылка и ссылка с mport" || t_fail "vpn-admin link: не все типы ссылок"
 
 STATUS_OUT=$(vpn-admin status 2>&1)
 [[ "$STATUS_OUT" == *"РАБОТАЕТ"* ]] && t_ok "vpn-admin status: служба работает" || t_fail "vpn-admin status: ${STATUS_OUT}"
 
+BYPASS_OUT=$(vpn-admin ru-bypass 2>&1)
+[[ "$BYPASS_OUT" == *"sberbank.ru"* && "$BYPASS_OUT" == *"Hiddify"* ]] \
+    && t_ok "vpn-admin ru-bypass: инструкция обхода РФ" || t_fail "vpn-admin ru-bypass"
+
 HELP_OUT=$(vpn-admin help 2>&1)
-[[ "$HELP_OUT" == *"add-domain"* && "$HELP_OUT" == *"upgrade"* ]] && t_ok "vpn-admin help" || t_fail "vpn-admin help"
+[[ "$HELP_OUT" == *"add-domain"* && "$HELP_OUT" == *"upgrade"* && "$HELP_OUT" == *"google-mode"* ]] \
+    && t_ok "vpn-admin help" || t_fail "vpn-admin help"
 
 vpn-admin no-such-command > /dev/null 2>&1
 RC=$?
@@ -338,6 +348,16 @@ vpn-admin password "$ORIGINAL_PASSWORD" > /dev/null 2>&1 && t_ok "исходны
 if [[ "$WARP_ACTIVE" == true ]]; then
     vpn-admin test-ai > "${WORK_DIR}/test-ai.log" 2>&1 && t_ok "vpn-admin test-ai" \
         || t_fail "vpn-admin test-ai: $(cat "${WORK_DIR}/test-ai.log")"
+    if vpn-admin google-mode direct > /dev/null 2>&1 && [[ "$(get_google_mode "$CONFIG")" == "direct" ]]; then
+        t_ok "vpn-admin google-mode direct"
+    else
+        t_fail "vpn-admin google-mode direct не сработал"
+    fi
+    if vpn-admin google-mode warp > /dev/null 2>&1 && [[ "$(get_google_mode "$CONFIG")" == "warp" ]]; then
+        t_ok "vpn-admin google-mode warp"
+    else
+        t_fail "vpn-admin google-mode warp не сработал"
+    fi
 fi
 
 # ============================================================
@@ -380,7 +400,7 @@ else
     fi
 
     # 5.3 Только диапазон, без 443 — однозначно проверяет NAT-редирект
-    HOP_ONLY_LINK="hysteria2://$(get_auth_password "$CONFIG")@${HOST_IP}:${HOP_PORT_START}-${HOP_PORT_END}/?insecure=1&pinSHA256=${PIN}"
+    HOP_ONLY_LINK="hysteria2://$(get_auth_password "$CONFIG")@${HOST_IP}:${HOP_PORT_START}-${HOP_PORT_END}/?insecure=1&sni=${CERT_CN}&pinSHA256=${PIN}"
     if start_client "$HOP_ONLY_LINK"; then
         TRACE=$(trace_via_client hostname)
         [[ "$(warp_state "$TRACE")" != "none" ]] && t_ok "только порты ${HOP_PORT_START}-${HOP_PORT_END}: NAT-редирект работает" \
@@ -428,7 +448,7 @@ else
             [[ "$STATE" == "on" ]] && t_ok "по имени сайта (прокси-режим): трафик через WARP" \
                 || t_fail "по имени сайта: ожидали warp=on, получили ${STATE}"
             STATE=$(warp_state "$(trace_via_client ip)")
-            [[ "$STATE" == "on" ]] && t_ok "только IP (как TUN-режим): sniffing направил трафик через WARP" \
+            [[ "$STATE" == "on" ]] && t_ok "только IP (как TUN-режиме): sniffing направил трафик через WARP" \
                 || t_fail "только IP (TUN): ожидали warp=on, получили ${STATE} — sniffing не работает"
         else
             t_fail "клиент не подключился для теста WARP"
@@ -495,10 +515,13 @@ t_check "служба работает со старым конфигом" wait_
 vpn-admin upgrade -y > "${WORK_DIR}/upgrade.log" 2>&1
 RC=$?
 [[ $RC -eq 0 ]] && t_ok "vpn-admin upgrade -y завершился успешно" || t_fail "upgrade: код ${RC}: $(cat "${WORK_DIR}/upgrade.log")"
+t_check "после upgrade: 5G QUIC тюнинг включён" config_has_quic_tuning "$CONFIG"
 t_check "после upgrade: sniffing включён" sniff_is_enabled "$CONFIG"
+t_check "после upgrade: rewriteDomain включён" sniff_rewrite_is_enabled "$CONFIG"
+t_check "после upgrade: блокировка UDP 443 включена" config_has_udp443_reject "$CONFIG"
 MISSING=""
 for domain in "${RECOMMENDED_WARP_DOMAINS[@]}"; do
-    acl_has_domain "$CONFIG" "$domain" || MISSING+=" ${domain}"
+    acl_has_domain_configured "$CONFIG" "$domain" || MISSING+=" ${domain}"
 done
 [[ -z "$MISSING" ]] && t_ok "после upgrade: все рекомендуемые домены на месте" || t_fail "после upgrade нет:${MISSING}"
 t_check "после upgrade: YAML валиден, дублей нет" yaml_is_valid_without_duplicates

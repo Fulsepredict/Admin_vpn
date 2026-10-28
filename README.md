@@ -2,25 +2,25 @@
 
 [![CI](https://github.com/Fulsepredict/Admin_vpn/actions/workflows/ci.yml/badge.svg)](https://github.com/Fulsepredict/Admin_vpn/actions/workflows/ci.yml)
 
-> Установщик и консольная панель управления VPN на базе **Hysteria 2** с **Google BBR**, **Cloudflare WARP (SOCKS5)**, **Smart ACL + sniffing** и **Port Hopping**.
+> Установщик и консольная панель управления VPN на базе **Hysteria 2** с **Google BBR**, **5G/LTE QUIC тюнингом**, **Cloudflare WARP (SOCKS5)**, **Smart ACL + sniffing** и **Port Hopping**.
 
 ---
 
 ## ⚡ Что умеет
 
-* 🚀 **Скорость:** Hysteria 2 (QUIC поверх UDP) + **BBR** и планировщик **FQ**; буферы UDP увеличены до **8 MB**.
-* 🌐 **Smart ACL через Cloudflare WARP:** трафик к Instagram/Meta, Threads, ChatGPT, Claude, Google/Gemini и стримингам выходит в интернет с IP-адреса Cloudflare WARP, а не с IP дата-центра хостинга. Остальной трафик (YouTube и т.д.) идёт напрямую — так быстрее.
-* 🧲 **Sniffing (работает и в TUN-режиме):** сервер сам определяет имя сайта по TLS SNI / HTTP Host / QUIC. Без этого клиенты в TUN-режиме (NekoRay/NekoBox, Hiddify, v2rayN с «VPN-режимом») присылают только IP-адрес, правила ACL не срабатывают, и сайты «видят» IP хостинга (например, Gemini отвечает *User location is not supported*).
-* 🔀 **Port Hopping (UDP 20000–50000):** клиент периодически меняет порт подключения — это усложняет замедление и блокировку по одному порту.
+* 🚀 **Скорость и стабильность на 5G/LTE:** Hysteria 2 (QUIC поверх UDP) + принудительный адаптивный **BBR** (`ignoreClientBandwidth: true`, чтобы мобильные клиенты не включали агрессивный `Brutal`) + защита от потери крупных пакетов на сотовых вышках (`disablePathMTUDiscovery: true`) + буферы UDP **8 MB** и оптимизация `nf_conntrack`.
+* 🌐 **Smart ACL через Cloudflare WARP + анти-QUIC:** трафик к Instagram/Meta, Threads, ChatGPT, Claude, Google/Gemini/Antigravity и стримингам выходит через Cloudflare WARP (`127.0.0.1:40000`), а внешний `UDP 443` блокируется (`reject(all, udp/443)`), чтобы браузеры и приложения мгновенно переходили на стабильный `TCP 443`.
+* 🇺🇸 **Режим `google-mode` для серверов в США/Европе:** если ваш VPS уже находится в США, команда `vpn-admin google-mode direct` переключает всю экосистему Google, Gemini и Antigravity (`antigravity.google`, `cloudcode-pa.googleapis.com`, `pki.goog`) на чистый прямой IPv4 вашего сервера (`mode: 46` без утечки IPv6).
+* 🇷🇺 **Обход VPN для Сбербанка, Яндекса и Госуслуг (`vpn-admin ru-bypass`):** готовые инструкции в 1 клик и списки доменов для раздельного туннелирования российских сервисов напрямую мимо VPN.
+* 🧲 **Sniffing (`rewriteDomain: true`, работает и в TUN-режиме):** сервер сам определяет имя сайта по TLS SNI / HTTP Host / QUIC и передаёт распознанный домен в исходящий прокси.
+* 🔀 **Port Hopping (UDP 20000–50000) + `sni=bing.com`:** клиент периодически меняет порт подключения и передаёт корректный SNI для прохождения мобильных ТСПУ.
 * 🔒 **Закреплённый сертификат (pinSHA256):** ссылки содержат отпечаток сертификата сервера, поэтому клиент не подключится к подставному серверу, даже при `insecure=1`.
-* 🎭 **Маскировка:** без пароля сервер отвечает как прокси к `bing.com`.
-* 🛡️ **Аккуратная безопасность:** UFW **без сброса** существующих правил (порт SSH определяется автоматически, правила ботов и других сервисов сохраняются), Fail2ban, ключ и конфиг закрыты правами `640`, автообновления безопасности.
+* 🛡️ **Аккуратная безопасность:** UFW **без сброса** существующих правил (порт SSH определяется автоматически), Fail2ban, ключ и конфиг закрыты правами `640`, автообновления безопасности.
 * ♻️ **Безопасные изменения:** любая правка конфига из `vpn-admin` делается с бэкапом; если Hysteria не запустилась — автоматический откат.
-* 🩺 **Healthcheck каждые 5 минут:** проверяет не только службы, но и что туннель WARP реально работает (`warp=on`), и сам переподключает его.
-* 🤖 **Совместимость с ботами на том же сервере:** WARP работает только как локальный SOCKS5 (`127.0.0.1:40000`) и не меняет маршруты сервера.
+* 🩺 **Бережный Healthcheck каждые 5 минут:** проверяет `warp=on` с 3 повторными попытками, чтобы единичный сетевой лаг не перезапускал `warp-svc` и не обрывал живые сессии.
 
 > [!IMPORTANT]
-> **Честно о WARP.** WARP даёт IP-адрес Cloudflare вместо IP хостинга — это заметно снижает подозрительность для антифрод-систем, но это **не** «резидентный» и не личный IP: одни и те же адреса WARP используют многие люди. Никакой VPN не гарантирует отсутствие банов, теневых банов или капчи — на это влияют и поведение аккаунта, и отпечаток устройства. Для прогрева и мультиаккаунтинга соблюдай лимиты действий и не держи много аккаунтов на одном выходном IP.
+> **Честно о WARP и Google.** Бесплатный WARP даёт общий IP Cloudflare вместо IP хостинга. Однако если ваш сервер физически расположен в **США**, родной IPv4 вашего VPS для входа в аккаунты Google и **Antigravity IDE** значительно чище общего пула WARP (который Google нередко помечает как спам или РФ). Для американских серверов рекомендуется выполнить: `vpn-admin google-mode direct`.
 
 ---
 
@@ -44,35 +44,36 @@ bash <(curl -fsSL https://raw.githubusercontent.com/Fulsepredict/Admin_vpn/main/
 
 ```bash
 bash <(curl -fsSL https://raw.githubusercontent.com/Fulsepredict/Admin_vpn/main/install.sh)
-vpn-admin upgrade
+vpn-admin upgrade -y
 ```
 
-1. `install.sh` обновляет панель `vpn-admin` и healthcheck (VPN при этом не перезапускается).
-2. `vpn-admin upgrade` показывает, что изменится, и после подтверждения: включает **sniffing**, добавляет недостающие рекомендуемые домены, убирает дубли в ACL. Перед изменением делается бэкап, при сбое — автооткат. Пароль и ссылки клиентов **не меняются**.
+1. `install.sh` обновляет панель `vpn-admin` и бережный healthcheck.
+2. `vpn-admin upgrade` включает **5G QUIC тюнинг**, **sniffing (`rewriteDomain: true`)**, **блокировку внешнего UDP 443**, приоритет **IPv4**, добавляет все домены **Google / Antigravity** и убирает дубли в ACL. Перед изменением делается бэкап, при сбое — автооткат. Пароль и сертификат **не меняются**.
+3. Если сервер находится в США — переключи Google/Antigravity на прямой IPv4 сервера:
+   ```bash
+   vpn-admin google-mode direct
+   ```
 
-Проверить результат: `vpn-admin test-ai`.
+Проверить результат: `vpn-admin test-ai` и получить обновлённые ссылки (с `sni=bing.com`): `vpn-admin link`.
 
 ---
 
-## 📱 Подключение на устройствах
+## 📱 Подключение на устройствах и обход для банков РФ
 
 `vpn-admin link` показывает 4 ссылки:
 
 | № | Ссылка | Когда использовать |
 |---|--------|--------------------|
-| 1 | `hy2://…&pinSHA256=…&mport=443,20000-50000#Hysteria2-PortHop` | **Рекомендуемая.** Port hopping + закреплённый сертификат (NekoBox, Hiddify, v2rayN) |
-| 2 | `hy2://…:443?…&pinSHA256=…#Hysteria2` | Только порт 443 |
-| 3 | `hy2://…&mport=…#Hysteria2-PortHop-NoPin` | Если клиент не подключается по ссылкам 1–2 (не понимает `pinSHA256`) |
-| 4 | `hysteria2://…@IP:443,20000-50000/?…` | Официальный формат Hysteria: диапазон портов прямо в адресе (официальный клиент `hysteria`) |
+| 1 | `hy2://…&sni=bing.com&pinSHA256=…&mport=443,20000-50000#Hysteria2-PortHop` | **Рекомендуемая для Wi-Fi и ПК.** Port hopping + SNI + закреплённый сертификат |
+| 2 | `hy2://…:443?…&sni=bing.com&pinSHA256=…#Hysteria2` | **Только порт 443 (лучше для мобильных сетей 4G/5G РФ**, если оператор режет высокие UDP-порты) |
+| 3 | `hy2://…&sni=bing.com&mport=…#Hysteria2-PortHop-NoPin` | Если клиент не подключается по ссылкам 1–2 (не понимает `pinSHA256`) |
+| 4 | `hysteria2://…@IP:443,20000-50000/?…&sni=bing.com…` | Официальный формат Hysteria: диапазон портов прямо в адресе |
 
-### Рекомендуемые клиенты
-* **Android:** [NekoBox](https://github.com/MatsuriDayo/NekoBoxForAndroid), [Hiddify](https://github.com/hiddify/hiddify-app)
-* **iOS:** [Streisand](https://apps.apple.com/app/streisand/id6450534064), [Shadowrocket](https://apps.apple.com/app/shadowrocket/id932747118)
-* **Windows:** [v2rayN](https://github.com/2dust/v2rayN), [Hiddify](https://github.com/hiddify/hiddify-app), [NekoRay](https://github.com/MatsuriDayo/nekoray) (проект архивирован с декабря 2024 — работает, но обновлений больше не будет)
-* **macOS:** [Hiddify](https://github.com/hiddify/hiddify-app), [Streisand](https://apps.apple.com/app/streisand/id6450534064)
-
-> [!TIP]
-> Благодаря sniffing можно спокойно включать **TUN-режим** в клиенте — ACL и WARP работают так же, как в режиме системного прокси.
+### 🇷🇺 Как пустить Сбербанк, Яндекс и Госуслуги мимо VPN (`vpn-admin ru-bypass`)
+Чтобы российские банки и сервисы видели ваш настоящий российский IP и открывались мгновенно:
+* **Hiddify:** Настройки (⚙️) → Регион (Region) → выбери **Россия (`ru`)**.
+* **v2rayN (v7+):** Настройки → Региональные пресеты (Regional presets) → **Россия (Russia)**.
+* **NekoBox / Streisand / Shadowrocket:** добавь в правила маршрутизации `Direct` (Напрямую) для `geosite:ru`, `geoip:ru` и доменов `.ru`, `.su`, `.xn--p1ai`. Полный список доменов выводит команда `vpn-admin ru-bypass`.
 
 ---
 
@@ -87,14 +88,16 @@ vpn-admin
 Все команды (подходят и для скриптов):
 
 ```bash
-vpn-admin status                  # Hysteria, WARP (warp=on?), sniffing, ACL, BBR, port hopping
-vpn-admin link                    # ссылки для клиентов
-vpn-admin test-ai                 # проверить ChatGPT / Claude / Instagram / Gemini через WARP
+vpn-admin status                  # Hysteria, WARP, 5G QUIC, sniffing, режим Google, BBR
+vpn-admin link                    # ссылки для клиентов (с sni=bing.com и pinSHA256)
+vpn-admin test-ai                 # проверить ChatGPT / Claude / Instagram / Antigravity
+vpn-admin google-mode [direct|warp] # пустить Google/Antigravity напрямую (для VPS в США) или через WARP
+vpn-admin ru-bypass               # инструкция обхода VPN для Сбербанка, Яндекса и Госуслуг
 vpn-admin password [НОВЫЙ]        # сменить пароль (8–64 символа: A-Z a-z 0-9 _ -)
 vpn-admin domains                 # какие домены идут через WARP
 vpn-admin add-domain tiktok.com   # отправить домен (и все поддомены) через WARP
 vpn-admin remove-domain tiktok.com
-vpn-admin upgrade [-y]            # sniffing + рекомендуемые домены + чистка дублей
+vpn-admin upgrade [-y]            # 5G QUIC + sniffing + домены Antigravity + чистка дублей
 vpn-admin logs                    # последние строки журнала Hysteria
 vpn-admin restart                 # перезапустить Hysteria и WARP
 vpn-admin toggle                  # остановить / запустить Hysteria
@@ -120,7 +123,7 @@ vpn-admin migrate                 # как переехать на новый с
 
 ## 🧪 Тесты
 
-* `tests/test_audit.py` — юнит-тесты: вызывают настоящие функции скриптов на временных файлах (генерация конфига и ссылок, валидация ввода, правки ACL, upgrade старого конфига, отсутствие опасных команд). Запуск: `python3 tests/test_audit.py` (нужны bash, PyYAML, shellcheck).
+* `tests/test_audit.py` — юнит-тесты: вызывают настоящие функции скриптов на временных файлах (генерация конфига и ссылок, 5G QUIC тюнинг, переключение `google-mode`, валидация ввода, правки ACL, upgrade старого конфига, отсутствие опасных команд). Запуск: `python3 tests/test_audit.py` (нужны bash, PyYAML, shellcheck).
 * `tests/integration.sh` — интеграционный тест в GitHub Actions на чистой Ubuntu: полная установка, команды `vpn-admin`, автооткат, реальный туннель с port hopping и pinSHA256 (клиент в отдельном network namespace), WARP + sniffing в режиме «только IP» (как TUN), healthcheck, upgrade старого конфига и повторный запуск `setup.sh`.
 
 ---

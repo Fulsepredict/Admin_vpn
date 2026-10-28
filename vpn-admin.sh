@@ -2,8 +2,9 @@
 # ============================================================
 # 🛡️ VPN Admin Panel (Enterprise Edition)
 # Интерактивная консольная панель управления Hysteria2 VPN
-# Поддержка: BBR, Cloudflare WARP SOCKS5, Smart ACL, sniffing,
-#            Port Hopping, healthcheck, безопасные правки с автооткатом
+# Поддержка: BBR, 5G QUIC Tune, Cloudflare WARP SOCKS5, Smart ACL,
+#            sniffing (rewriteDomain), Port Hopping, google-mode,
+#            ru-bypass, бережный healthcheck, автооткат конфига
 # GitHub: https://github.com/Fulsepredict/Admin_vpn
 # ============================================================
 
@@ -33,7 +34,9 @@ WARP_PORT=40000
 LISTEN_PORT=443
 HOP_PORT_START=20000
 HOP_PORT_END=50000
+CERT_CN="bing.com"
 SNIFF_TIMEOUT="2s"
+QUIC_IDLE_TIMEOUT="60s"
 MIN_HYSTERIA_VERSION="2.5.2"
 SERVICE_START_WAIT_SEC=3
 SERVICE_START_CHECKS=2
@@ -47,6 +50,15 @@ HEALTHCHECK_PATH="/usr/local/bin/vpn-healthcheck"
 HEALTHCHECK_LOG="/var/log/vpn-healthcheck.log"
 HEALTHCHECK_LOG_MAX_LINES=1000
 
+# Домены экосистемы Google / Gemini / Antigravity.
+# ВАЖНО: должен совпадать с GOOGLE_DOMAINS в setup.sh.
+GOOGLE_DOMAINS=(
+    google.com googleapis.com googleusercontent.com gstatic.com recaptcha.net
+    antigravity.google deepmind.google labs.google ai.google notebooklm.google blog.google
+    pki.goog dns.google withgoogle.com ggpht.com 1e100.net gvt1.com gvt2.com gvt3.com
+    ai.google.dev idx.dev appspot.com run.app cloudfunctions.net firebaseapp.com web.app
+)
+
 # Рекомендуемые домены для WARP. ВАЖНО: должен совпадать с WARP_DOMAINS
 # в setup.sh — это проверяет tests/test_audit.py.
 RECOMMENDED_WARP_DOMAINS=(
@@ -59,7 +71,7 @@ RECOMMENDED_WARP_DOMAINS=(
     # Anthropic / Claude
     anthropic.com claude.ai claude.com
     # Google, Gemini, Antigravity, ReCaptcha
-    google.com googleapis.com googleusercontent.com gstatic.com recaptcha.net
+    "${GOOGLE_DOMAINS[@]}"
     # Стриминги
     netflix.com netflix.net nflxvideo.net spotify.com
 )
@@ -209,6 +221,69 @@ set_auth_password() {
     replace_file_content "$file" "$tmp"
 }
 
+# Блок оптимизации QUIC для мобильных сетей 4G/5G и высокого пинга (США <-> РФ).
+# ВАЖНО: идентичен quic_block в setup.sh — тест сверяет.
+quic_block() {
+    cat <<EOF
+ignoreClientBandwidth: true
+
+quic:
+  initStreamReceiveWindow: 8388608
+  maxStreamReceiveWindow: 8388608
+  initConnReceiveWindow: 20971520
+  maxConnReceiveWindow: 20971520
+  maxIdleTimeout: ${QUIC_IDLE_TIMEOUT}
+  maxIncomingStreams: 1024
+  disablePathMTUDiscovery: true
+EOF
+}
+
+config_has_quic_tuning() {
+    local file="$1"
+    grep -Eq '^ignoreClientBandwidth:[[:space:]]*true' "$file" \
+        && grep -Eq '^quic:' "$file" \
+        && awk '
+            /^[^[:space:]#]/ { in_quic = ($0 ~ /^quic:/) }
+            in_quic && /^[[:space:]]+disablePathMTUDiscovery:[[:space:]]*true/ { found = 1 }
+            END { exit !found }
+        ' "$file"
+}
+
+ensure_quic_tuning() {
+    local file="$1" tmp
+    config_has_quic_tuning "$file" && return 0
+    # Если старых блоков нет совсем — аккуратно вставляем перед masquerade: (или в конец)
+    if ! grep -Eq '^ignoreClientBandwidth:' "$file" && ! grep -Eq '^quic:' "$file"; then
+        tmp=$(mktemp)
+        awk -v block="$(quic_block)" '
+            !inserted && /^masquerade:/ {
+                print block
+                print ""
+                inserted = 1
+            }
+            { print }
+            END {
+                if (!inserted) {
+                    print ""
+                    print block
+                }
+            }
+        ' "$file" > "$tmp"
+        replace_file_content "$file" "$tmp"
+        return 0
+    fi
+    # Если какие-то части уже были, пересоберём без старых ignoreClientBandwidth/quic и вставим актуальный блок
+    tmp=$(mktemp)
+    awk '
+        /^ignoreClientBandwidth:/ { next }
+        /^[^[:space:]#]/ { in_quic = ($0 ~ /^quic:/) }
+        in_quic { next }
+        { print }
+    ' "$file" > "$tmp"
+    replace_file_content "$file" "$tmp"
+    ensure_quic_tuning "$file"
+}
+
 # Блок sniffing. ВАЖНО: идентичен sniff_block в setup.sh — тест сверяет.
 sniff_block() {
     cat <<EOF
@@ -218,7 +293,7 @@ sniff_block() {
 sniff:
   enable: true
   timeout: ${SNIFF_TIMEOUT}
-  rewriteDomain: false
+  rewriteDomain: true
   tcpPorts: 80,443
   udpPorts: 443
 EOF
@@ -232,6 +307,14 @@ sniff_is_enabled() {
     awk '
         /^[^[:space:]#]/ { in_sniff = ($0 ~ /^sniff:/) }
         in_sniff && /^[[:space:]]+enable:[[:space:]]*true/ { found = 1 }
+        END { exit !found }
+    ' "$1"
+}
+
+sniff_rewrite_is_enabled() {
+    awk '
+        /^[^[:space:]#]/ { in_sniff = ($0 ~ /^sniff:/) }
+        in_sniff && /^[[:space:]]+rewriteDomain:[[:space:]]*true/ { found = 1 }
         END { exit !found }
     ' "$1"
 }
@@ -270,8 +353,114 @@ enable_sniff() {
     replace_file_content "$file" "$tmp"
 }
 
+enable_sniff_rewrite() {
+    local file="$1" tmp
+    sniff_rewrite_is_enabled "$file" && return 0
+    tmp=$(mktemp)
+    awk '
+        /^[^[:space:]#]/ { in_sniff = ($0 ~ /^sniff:/) }
+        in_sniff && /^[[:space:]]+rewriteDomain:/ {
+            match($0, /^[[:space:]]+/)
+            print substr($0, 1, RLENGTH) "rewriteDomain: true"
+            replaced = 1
+            next
+        }
+        { print }
+    ' "$file" > "$tmp"
+    replace_file_content "$file" "$tmp"
+    sniff_rewrite_is_enabled "$file" && return 0
+    tmp=$(mktemp)
+    awk '
+        /^sniff:[[:space:]]*$/ { print; print "  rewriteDomain: true"; next }
+        { print }
+    ' "$file" > "$tmp"
+    replace_file_content "$file" "$tmp"
+}
+
+config_has_ipv4_direct_outbound() {
+    awk '
+        /^[^[:space:]#]/ { in_out = ($0 ~ /^outbounds:/) }
+        in_out && /^[[:space:]]+-[[:space:]]*name:[[:space:]]*direct[[:space:]]*$/ { in_direct = 1; next }
+        in_out && /^[[:space:]]+-[[:space:]]*name:/ { in_direct = 0 }
+        in_out && in_direct && /^[[:space:]]+mode:[[:space:]]*46[[:space:]]*$/ { found = 1 }
+        END { exit !found }
+    ' "$1"
+}
+
+ensure_ipv4_direct_outbound() {
+    local file="$1" tmp
+    grep -Eq '^outbounds:' "$file" || return 0
+    config_has_ipv4_direct_outbound "$file" && return 0
+    tmp=$(mktemp)
+    awk '
+        /^[^[:space:]#]/ {
+            if (in_out && !inserted) {
+                print "  - name: direct"
+                print "    type: direct"
+                print "    direct:"
+                print "      mode: 46"
+                inserted = 1
+            }
+            in_out = ($0 ~ /^outbounds:/)
+        }
+        { print }
+        END {
+            if (in_out && !inserted) {
+                print "  - name: direct"
+                print "    type: direct"
+                print "    direct:"
+                print "      mode: 46"
+            }
+        }
+    ' "$file" > "$tmp"
+    replace_file_content "$file" "$tmp"
+}
+
 config_has_acl() {
     grep -Eq '^acl:' "$1" && grep -Eq '^[[:space:]]+- direct\(all\)[[:space:]]*$' "$1"
+}
+
+config_has_udp443_reject() {
+    grep -Eq '^[[:space:]]+- reject\(all,[[:space:]]*udp/443\)[[:space:]]*$' "$1"
+}
+
+config_has_ru_direct_rules() {
+    grep -Fq "direct(suffix:ru)" "$1" \
+        && grep -Fq "direct(suffix:su)" "$1" \
+        && grep -Fq "direct(suffix:xn--p1ai)" "$1"
+}
+
+ensure_acl_base_rules() {
+    local file="$1" tmp
+    config_has_acl "$file" || return 0
+    if ! config_has_udp443_reject "$file"; then
+        tmp=$(mktemp)
+        awk '
+            /^[[:space:]]+inline:[[:space:]]*$/ && !done {
+                print
+                print "    - reject(all, udp/443)"
+                done = 1
+                next
+            }
+            { print }
+        ' "$file" > "$tmp"
+        replace_file_content "$file" "$tmp"
+    fi
+    if ! config_has_ru_direct_rules "$file"; then
+        tmp=$(mktemp)
+        awk '
+            /^[[:space:]]+- reject\(all,[[:space:]]*udp\/443\)[[:space:]]*$/ && !done {
+                print
+                print "    - direct(suffix:ru)"
+                print "    - direct(suffix:su)"
+                print "    - direct(suffix:xn--p1ai)"
+                done = 1
+                next
+            }
+            { print }
+        ' "$file" > "$tmp"
+        replace_file_content "$file" "$tmp"
+    fi
 }
 
 acl_list_domains() {
@@ -280,6 +469,11 @@ acl_list_domains() {
 
 acl_has_domain() {
     grep -Fq "warp_proxy(suffix:${2})" "$1"
+}
+
+# Проверяет, есть ли домен в ACL (через warp_proxy или через явный direct).
+acl_has_domain_configured() {
+    grep -Fq "warp_proxy(suffix:${2})" "$1" || grep -Fq "direct(suffix:${2})" "$1"
 }
 
 # Добавляет домен перед "- direct(all)" (порядок правил в ACL важен:
@@ -317,6 +511,62 @@ acl_remove_domain() {
     replace_file_content "$file" "$tmp"
 }
 
+# Определяет текущий режим маршрутизации Google / Antigravity: "direct" или "warp".
+get_google_mode() {
+    local file="$1"
+    if grep -Fq "direct(suffix:google.com)" "$file"; then
+        echo "direct"
+    else
+        echo "warp"
+    fi
+}
+
+# Переключает все домены GOOGLE_DOMAINS между warp_proxy(suffix:...) и direct(suffix:...).
+# Почему это важно для серверов в США: личный американский IPv4 сервера для Google и Antigravity
+# гораздо чище общего пула бесплатного Cloudflare WARP, который Google часто считает российским.
+set_google_mode_in_file() {
+    local file="$1" mode="$2" target_outbound domain tmp
+    case "$mode" in
+        direct) target_outbound="direct" ;;
+        warp)   target_outbound="warp_proxy" ;;
+        *)      return 2 ;;
+    esac
+    config_has_acl "$file" || return 3
+
+    for domain in "${GOOGLE_DOMAINS[@]}"; do
+        if acl_has_domain_configured "$file" "$domain"; then
+            tmp=$(mktemp)
+            awk -v dom="$domain" -v out="$target_outbound" '
+                {
+                    line = $0
+                    sub(/^[[:space:]]+/, "", line)
+                    sub(/[[:space:]]+$/, "", line)
+                    if (line == "- warp_proxy(suffix:" dom ")" || line == "- direct(suffix:" dom ")") {
+                        match($0, /^[[:space:]]+/)
+                        print substr($0, 1, RLENGTH) "- " out "(suffix:" dom ")"
+                        next
+                    }
+                    print
+                }
+            ' "$file" > "$tmp"
+            replace_file_content "$file" "$tmp"
+        else
+            tmp=$(mktemp)
+            awk -v rule="${target_outbound}(suffix:${domain})" '
+                !done && /^[[:space:]]+- direct\(all\)[[:space:]]*$/ {
+                    match($0, /^[[:space:]]+/)
+                    print substr($0, 1, RLENGTH) "- " rule
+                    done = 1
+                }
+                { print }
+            ' "$file" > "$tmp"
+            replace_file_content "$file" "$tmp"
+        fi
+    done
+    ensure_ipv4_direct_outbound "$file"
+    acl_dedupe "$file"
+}
+
 # Убирает повторы правил и комментариев внутри секции acl:
 acl_dedupe() {
     local file="$1" tmp
@@ -334,7 +584,8 @@ acl_dedupe() {
     replace_file_content "$file" "$tmp"
 }
 
-# Приводит конфиг к актуальному виду: sniffing + рекомендуемые домены + без дублей.
+# Приводит конфиг к актуальному виду: QUIC тюнинг 5G + sniffing (rewriteDomain) +
+# анти-QUIC udp/443 + рекомендуемые домены + без дублей.
 # Печатает, что именно изменилось.
 upgrade_config_file() {
     local file="$1" domain
@@ -342,19 +593,50 @@ upgrade_config_file() {
         echo "no-acl"
         return 4
     fi
+    if ! config_has_quic_tuning "$file"; then
+        ensure_quic_tuning "$file"
+        echo "quic-tuned"
+    fi
     if ! config_has_sniff "$file"; then
         add_sniff_block "$file"
         echo "sniff-added"
-    elif ! sniff_is_enabled "$file"; then
-        enable_sniff "$file"
-        echo "sniff-enabled"
+    else
+        if ! sniff_is_enabled "$file"; then
+            enable_sniff "$file"
+            echo "sniff-enabled"
+        fi
+        if ! sniff_rewrite_is_enabled "$file"; then
+            enable_sniff_rewrite "$file"
+            echo "sniff-rewrite-enabled"
+        fi
     fi
+    if ! config_has_ipv4_direct_outbound "$file"; then
+        ensure_ipv4_direct_outbound "$file"
+        echo "direct-ipv4-added"
+    fi
+    if ! config_has_udp443_reject "$file"; then
+        ensure_acl_base_rules "$file"
+        echo "udp443-reject-added"
+    elif ! config_has_ru_direct_rules "$file"; then
+        ensure_acl_base_rules "$file"
+        echo "ru-direct-added"
+    fi
+
+    local current_google_mode
+    current_google_mode=$(get_google_mode "$file")
+
     for domain in "${RECOMMENDED_WARP_DOMAINS[@]}"; do
-        if ! acl_has_domain "$file" "$domain"; then
+        if ! acl_has_domain_configured "$file" "$domain"; then
             acl_add_domain "$file" "$domain" || return 1
             echo "domain-added ${domain}"
         fi
     done
+
+    # Если пользователь ранее выбрал прямой режим для Google, применим его и к новым доменам Google
+    if [[ "$current_google_mode" == "direct" ]]; then
+        set_google_mode_in_file "$file" "direct"
+    fi
+
     local before after
     before=$(wc -l < "$file")
     acl_dedupe "$file"
@@ -377,7 +659,7 @@ cert_pin() {
 # Ссылки для клиентов: "метка<TAB>ссылка". ВАЖНО: идентична build_links в setup.sh.
 build_links() {
     local ip="$1" password="$2" pin="$3"
-    local base="insecure=1&alpn=h3"
+    local base="insecure=1&sni=${CERT_CN}&alpn=h3"
     local pinned="$base"
     [[ -n "$pin" ]] && pinned="${base}&pinSHA256=${pin}"
     local ports="${LISTEN_PORT},${HOP_PORT_START}-${HOP_PORT_END}"
@@ -478,8 +760,8 @@ healthcheck_script() {
         -e "s|__WARP_SERVICE__|${WARP_SERVICE}|g" <<'EOF'
 #!/bin/bash
 # vpn-healthcheck — ставится командой "vpn-admin install-healthcheck".
-# Проверяет не только то, что службы запущены, но и что туннель WARP
-# реально работает (warp=on) — иначе сайты из ACL молча перестают открываться.
+# Проверяет службы и туннель WARP с 3 повторными попытками, чтобы
+# одиночный сетевой лаг не вызывал перезапуск warp-svc и слёт живых сессий.
 set -uo pipefail
 
 LOG="__LOG__"
@@ -489,10 +771,14 @@ WARP_PORT=__WARP_PORT__
 log() { echo "$(date '+%Y-%m-%d %H:%M:%S') | $*" >> "$LOG"; }
 
 warp_ok() {
-    local trace
-    trace=$(curl -s -x "socks5h://127.0.0.1:${WARP_PORT}" --connect-timeout 5 --max-time 10 \
-        https://www.cloudflare.com/cdn-cgi/trace 2>/dev/null || true)
-    [[ "$trace" == *"warp=on"* ]]
+    local attempt trace
+    for attempt in 1 2 3; do
+        trace=$(curl -s -x "socks5h://127.0.0.1:${WARP_PORT}" --connect-timeout 5 --max-time 10 \
+            https://www.cloudflare.com/cdn-cgi/trace 2>/dev/null || true)
+        [[ "$trace" == *"warp=on"* ]] && return 0
+        (( attempt < 3 )) && sleep 2
+    done
+    return 1
 }
 
 if ! systemctl is-active --quiet __SERVICE__; then
@@ -504,7 +790,7 @@ if command -v warp-cli >/dev/null 2>&1 && ! warp_ok; then
     warp-cli --accept-tos connect >/dev/null 2>&1 || true
     sleep 5
     if warp_ok; then
-        log "WARP reconnected"
+        log "WARP reconnected softly"
     else
         systemctl restart __WARP_SERVICE__
         sleep 5
@@ -540,7 +826,7 @@ install_healthcheck() {
     # Идемпотентно: удаляем старую строку и добавляем одну актуальную
     ( crontab -l 2>/dev/null | grep -v 'vpn-healthcheck'; echo "*/5 * * * * ${HEALTHCHECK_PATH}" ) | crontab - || return 1
     log_action "HEALTHCHECK_INSTALLED"
-    ok "Healthcheck установлен: ${HEALTHCHECK_PATH} (cron каждые 5 минут)"
+    ok "Healthcheck установлен: ${HEALTHCHECK_PATH} (cron каждые 5 минут, 3 попытки проверки)"
 }
 
 # ============================================================
@@ -572,22 +858,34 @@ show_status() {
     if [[ -f "$CONFIG" ]]; then
         if config_has_acl "$CONFIG"; then
             status_line "Smart ACL:" "${GREEN}● $(acl_list_domains "$CONFIG" | wc -l) доменов через WARP${NC}"
-            if sniff_is_enabled "$CONFIG"; then
-                status_line "Sniffing:" "${GREEN}● ВКЛЮЧЁН${NC} (ACL работает и для TUN-клиентов)"
+            if sniff_is_enabled "$CONFIG" && sniff_rewrite_is_enabled "$CONFIG"; then
+                status_line "Sniffing:" "${GREEN}● ВКЛЮЧЁН (rewriteDomain: true)${NC}"
+            elif sniff_is_enabled "$CONFIG"; then
+                status_line "Sniffing:" "${YELLOW}● ВКЛЮЧЁН (без rewriteDomain)${NC} — выполни: vpn-admin upgrade"
             else
                 status_line "Sniffing:" "${YELLOW}● ВЫКЛЮЧЕН${NC} — выполни: vpn-admin upgrade"
             fi
+            if [[ "$(get_google_mode "$CONFIG")" == "direct" ]]; then
+                status_line "Google / Antigravity:" "${GREEN}● НАПРЯМУЮ${NC} (чистый IPv4 сервера)"
+            else
+                status_line "Google / Antigravity:" "${CYAN}● ЧЕРЕЗ WARP${NC} (сменить: vpn-admin google-mode direct)"
+            fi
         else
             status_line "Smart ACL:" "${YELLOW}○ НЕ НАСТРОЕН${NC}"
+        fi
+        if config_has_quic_tuning "$CONFIG"; then
+            status_line "5G / Мобильный тюнинг:" "${GREEN}● АКТИВЕН${NC} (BBR-only + анти-MTU blackhole)"
+        else
+            status_line "5G / Мобильный тюнинг:" "${YELLOW}● ВЫКЛЮЧЕН${NC} — выполни: vpn-admin upgrade"
         fi
     fi
 
     local bbr_status
     bbr_status=$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null || echo "unknown")
     if [[ "$bbr_status" == "bbr" ]]; then
-        status_line "Google BBR:" "${GREEN}● ВКЛЮЧЕН${NC}"
+        status_line "Google BBR (TCP):" "${GREEN}● ВКЛЮЧЕН${NC}"
     else
-        status_line "Google BBR:" "${YELLOW}● ${bbr_status}${NC}"
+        status_line "Google BBR (TCP):" "${YELLOW}● ${bbr_status}${NC}"
     fi
 
     local nat_rules
@@ -674,8 +972,8 @@ show_link() {
     local label link
     while IFS=$'\t' read -r label link; do
         case "$label" in
-            porthop)  echo -e "  ${BOLD}1. Рекомендуемая (port hopping + закреплённый сертификат):${NC}" ;;
-            standard) echo -e "  ${BOLD}2. Стандартная (порт ${LISTEN_PORT}):${NC}" ;;
+            porthop)  echo -e "  ${BOLD}1. Рекомендуемая для Wi-Fi и ПК (port hopping + sni + сертификат):${NC}" ;;
+            standard) echo -e "  ${BOLD}2. Стандартная (только порт ${LISTEN_PORT} — лучше для мобильных сетей 4G/5G РФ):${NC}" ;;
             nopin)    echo -e "  ${BOLD}3. Если клиент не подключается по ссылкам 1–2 (без pinSHA256):${NC}" ;;
             official) echo -e "  ${BOLD}4. Официальный формат Hysteria (порты в адресе):${NC}" ;;
             *)        echo -e "  ${BOLD}${label}:${NC}" ;;
@@ -684,9 +982,10 @@ show_link() {
     done < <(build_links "$ip" "$pass" "$pin")
 
     if [[ -n "$pin" ]]; then
-        echo -e "  ${DIM}pinSHA256 — клиент примет только сертификат этого сервера (защита от подмены).${NC}"
+        echo -e "  ${DIM}pinSHA256 + sni=${CERT_CN} — защита от подмены и маскировка под HTTP/3 для ТСПУ.${NC}"
     fi
-    echo -e "  ${DIM}Клиенты: NekoBox, Hiddify, v2rayN, Streisand, Shadowrocket${NC}"
+    echo -e "  ${DIM}Настройка обхода для Сбербанка, Яндекса и Госуслуг: vpn-admin ru-bypass${NC}"
+    echo -e "  ${DIM}Клиенты: Hiddify, v2rayN, NekoBox, Streisand, Shadowrocket${NC}"
     pause
 }
 
@@ -696,14 +995,18 @@ check_site_via_warp() {
     code=$(curl -s -o /dev/null -w "%{http_code}" -x "socks5h://127.0.0.1:${WARP_PORT}" \
         --connect-timeout 6 --max-time 15 "$url" 2>/dev/null || true)
     case "$code" in
-        2??|3??) printf "  %-26s ${GREEN}✅ Доступен (HTTP %s)${NC}\n" "$name" "$code" ;;
-        403)     printf "  %-26s ${YELLOW}⚠ HTTP 403 (антибот-заглушка, в браузере обычно открывается)${NC}\n" "$name" ;;
-        *)       printf "  %-26s ${RED}❌ Нет ответа (HTTP %s)${NC}\n" "$name" "${code:-000}" ;;
+        2??|3??|404) printf "  %-28s ${GREEN}✅ Доступен (HTTP %s)${NC}\n" "$name" "$code" ;;
+        403)         printf "  %-28s ${YELLOW}⚠ HTTP 403 (антибот-заглушка, в браузере обычно открывается)${NC}\n" "$name" ;;
+        *)           printf "  %-28s ${RED}❌ Нет ответа (HTTP %s)${NC}\n" "$name" "${code:-000}" ;;
     esac
 }
 
 test_ai() {
-    header "🧪 Тест обхода антифрода (ИИ & Meta)"
+    header "🧪 Тест обхода антифрода (ИИ, Antigravity & Meta)"
+
+    local direct_ip
+    direct_ip=$(get_ip)
+    echo -e "  ${BOLD}Прямой IPv4 сервера:${NC} ${CYAN}${direct_ip}${NC}"
 
     local trace
     trace=$(warp_trace)
@@ -723,22 +1026,32 @@ test_ai() {
     check_site_via_warp "Claude (claude.ai)" "https://claude.ai"
     check_site_via_warp "Instagram" "https://www.instagram.com"
     check_site_via_warp "Gemini API (googleapis)" "https://generativelanguage.googleapis.com"
+    check_site_via_warp "Antigravity (cloudcode-pa)" "https://cloudcode-pa.googleapis.com"
     echo ""
 
     if [[ -f "$CONFIG" ]]; then
-        if sniff_is_enabled "$CONFIG"; then
-            ok "Sniffing включён — ACL работает и для клиентов в TUN-режиме"
+        echo -e "  ${BOLD}Текущий режим Google / Antigravity:${NC} $(get_google_mode "$CONFIG")"
+        echo -e "  ${DIM}Если сервер в США, для стабильного входа в Antigravity рекомендуется:${NC}"
+        echo -e "  ${CYAN}vpn-admin google-mode direct${NC}\n"
+
+        if sniff_is_enabled "$CONFIG" && sniff_rewrite_is_enabled "$CONFIG"; then
+            ok "Sniffing + rewriteDomain включены — ACL работает и для клиентов в TUN-режиме"
         else
-            warn "Sniffing выключен — клиенты в TUN-режиме обходят WARP. Исправить: vpn-admin upgrade"
+            warn "Sniffing или rewriteDomain выключены — выполни: vpn-admin upgrade"
+        fi
+        if config_has_quic_tuning "$CONFIG"; then
+            ok "5G QUIC тюнинг (ignoreClientBandwidth + анти-MTU blackhole) включён"
+        else
+            warn "5G QUIC тюнинг не включён — выполни: vpn-admin upgrade"
         fi
         local domain missing=""
         for domain in "${RECOMMENDED_WARP_DOMAINS[@]}"; do
-            acl_has_domain "$CONFIG" "$domain" || missing+=" ${domain}"
+            acl_has_domain_configured "$CONFIG" "$domain" || missing+=" ${domain}"
         done
         if [[ -n "$missing" ]]; then
             warn "В ACL нет рекомендуемых доменов:${missing}. Исправить: vpn-admin upgrade"
         else
-            ok "Все рекомендуемые домены есть в ACL"
+            ok "Все рекомендуемые домены настроены в ACL"
         fi
     fi
     pause
@@ -748,6 +1061,8 @@ test_ai() {
 restart_server() {
     header "🔄 Перезапуск VPN и WARP"
     systemctl restart "$WARP_SERVICE" 2>/dev/null || true
+    sleep 2
+    warp-cli --accept-tos connect >/dev/null 2>&1 || true
     if restart_and_verify; then
         ok "Hysteria 2 и WARP перезапущены"
     else
@@ -854,7 +1169,7 @@ migration() {
     pause
 }
 
-# 12. Домены WARP
+# 12. Домены WARP и режим Google / Antigravity
 list_domains() {
     header "🌐 Домены, которые идут через WARP"
     if [[ ! -f "$CONFIG" ]] || ! config_has_acl "$CONFIG"; then
@@ -864,7 +1179,7 @@ list_domains() {
     fi
     acl_list_domains "$CONFIG" | sed 's/^/    • /'
     echo ""
-    echo -e "  ${DIM}Всего: $(acl_list_domains "$CONFIG" | wc -l). Остальной трафик идёт напрямую.${NC}"
+    echo -e "  ${DIM}Всего через WARP: $(acl_list_domains "$CONFIG" | wc -l). Режим Google/Antigravity: $(get_google_mode "$CONFIG").${NC}"
     pause
 }
 
@@ -929,12 +1244,53 @@ remove_domain() {
     return 1
 }
 
+# Переключение маршрута Google / Antigravity: direct (IP сервера) или warp (Cloudflare WARP).
+google_mode_cmd() {
+    header "🇺🇸 Режим маршрутизации Google / Antigravity / Gemini"
+    if [[ ! -f "$CONFIG" ]] || ! config_has_acl "$CONFIG"; then
+        fail "Smart ACL не настроен"
+        pause
+        return 1
+    fi
+
+    local current mode="${1:-}"
+    current=$(get_google_mode "$CONFIG")
+    echo -e "  ${BOLD}Текущий режим:${NC} ${CYAN}${current}${NC}"
+    echo -e "  ${DIM}• direct — напрямую через чистый IPv4 твоего сервера (лучше для VPS в США/Европе)${NC}"
+    echo -e "  ${DIM}• warp   — через бесплатный Cloudflare WARP (если родной IP сервера помечен как РФ)${NC}\n"
+
+    if [[ -z "$mode" && -t 0 ]]; then
+        echo -ne "  Выбери режим (${BOLD}direct${NC} / ${BOLD}warp${NC}): "
+        read -r mode
+    fi
+    mode="${mode,,}"
+    if [[ "$mode" != "direct" && "$mode" != "warp" ]]; then
+        fail "Укажи режим: vpn-admin google-mode direct  или  vpn-admin google-mode warp"
+        pause
+        return 2
+    fi
+
+    if apply_config_change "google_mode_${mode}" set_google_mode_in_file "$mode"; then
+        if [[ "$mode" == "direct" ]]; then
+            ok "Все домены Google, Antigravity и Gemini переключены НАПРЯМУЮ (через IPv4 сервера)"
+        else
+            ok "Все домены Google, Antigravity и Gemini переключены ЧЕРЕЗ WARP"
+        fi
+        log_action "GOOGLE_MODE_CHANGED: ${mode}"
+        pause
+        return 0
+    fi
+    pause
+    return 1
+}
+
 domains_menu() {
     while true; do
-        header "🌐 Домены WARP"
-        echo -e "   ${BOLD}1${NC} │ Показать список"
-        echo -e "   ${BOLD}2${NC} │ Добавить домен"
-        echo -e "   ${BOLD}3${NC} │ Убрать домен"
+        header "🌐 Домены WARP и режим Google"
+        echo -e "   ${BOLD}1${NC} │ Показать список доменов WARP"
+        echo -e "   ${BOLD}2${NC} │ Добавить домен в WARP"
+        echo -e "   ${BOLD}3${NC} │ Убрать домен из WARP"
+        echo -e "   ${BOLD}4${NC} │ Переключить режим Google / Antigravity (direct ↔ warp)"
         echo -e "   ${BOLD}0${NC} │ Назад"
         echo ""
         echo -ne "  ${BOLD}Выбери пункт: ${NC}"
@@ -944,6 +1300,7 @@ domains_menu() {
             1) list_domains ;;
             2) add_domain ;;
             3) remove_domain ;;
+            4) google_mode_cmd ;;
             0) return 0 ;;
             *) echo -e "\n  ${RED}Неверный выбор${NC}"; sleep 1 ;;
         esac
@@ -952,7 +1309,7 @@ domains_menu() {
 
 # 13. Обновление конфига до актуальной версии
 upgrade_config() {
-    header "🛠️ Обновление конфига (sniffing + домены + чистка дублей)"
+    header "🛠️ Обновление конфига (5G QUIC + sniffing + домены Antigravity + чистка дублей)"
 
     if [[ ! -f "$CONFIG" ]]; then
         fail "Конфиг не найден: ${CONFIG}"
@@ -986,7 +1343,7 @@ upgrade_config() {
     fi
 
     if [[ -z "$changes" ]]; then
-        ok "Конфиг уже актуален: sniffing включён, все домены на месте, дублей нет"
+        ok "Конфиг уже актуален: 5G QUIC тюнинг, sniffing, анти-QUIC и все домены на месте"
         pause
         return 0
     fi
@@ -995,11 +1352,16 @@ upgrade_config() {
     local kind value
     while read -r kind value; do
         case "$kind" in
-            sniff-added)        echo "    • включить sniffing (ACL заработает для TUN-клиентов)" ;;
-            sniff-enabled)      echo "    • включить выключенный sniffing (enable: false → true)" ;;
-            domain-added)       echo "    • добавить в WARP: ${value}" ;;
-            duplicates-removed) echo "    • удалить дубли в ACL: ${value} строк" ;;
-            *)                  echo "    • ${kind} ${value}" ;;
+            quic-tuned)             echo "    • включить 5G QUIC тюнинг (ignoreClientBandwidth + анти-MTU blackhole)" ;;
+            sniff-added)            echo "    • включить sniffing с rewriteDomain: true (для TUN-клиентов)" ;;
+            sniff-enabled)          echo "    • включить выключенный sniffing (enable: false → true)" ;;
+            sniff-rewrite-enabled)  echo "    • включить rewriteDomain: true в sniffing" ;;
+            direct-ipv4-added)      echo "    • добавить приоритет IPv4 (mode: 46) для прямого выхода" ;;
+            udp443-reject-added)    echo "    • добавить блокировку внешнего UDP 443 (принудительный TCP 443 для WARP)" ;;
+            ru-direct-added)        echo "    • добавить прямое правило для доменов .ru / .su / .рф" ;;
+            domain-added)           echo "    • добавить домен: ${value}" ;;
+            duplicates-removed)     echo "    • удалить дубли в ACL: ${value} строк" ;;
+            *)                      echo "    • ${kind} ${value}" ;;
         esac
     done <<< "$changes"
     echo ""
@@ -1018,7 +1380,6 @@ upgrade_config() {
         return 1
     fi
 
-    # Старые установки ставили healthcheck без проверки warp=on — обновим его
     install_healthcheck || warn "Не удалось обновить healthcheck"
     pause
 }
@@ -1049,28 +1410,59 @@ self_update() {
     exit 0
 }
 
+# 15. Инструкция и правила обхода для сервисов РФ (Сбербанк, Яндекс, Госуслуги)
+show_ru_bypass() {
+    header "🇷🇺 Обход VPN для Сбербанка, Яндекса, Госуслуг и сайтов РФ"
+    cat <<EOF
+  Чтобы российские банки и сервисы видели твой настоящий российский IP
+  и открывались мгновенно (не летая через сервер в США), включи
+  раздельное туннелирование (Split Tunneling) в своём клиенте:
+
+  ${BOLD}1. Hiddify (Windows / Android / iOS / macOS):${NC}
+     • Настройки (⚙️) → Регион (Region) → выбери ${CYAN}Россия (ru)${NC}
+     • Все сайты .ru, Сбербанк, Яндекс и Госуслуги пойдут напрямую мимо VPN!
+
+  ${BOLD}2. v2rayN (Windows v7+):${NC}
+     • Настройки → Региональные пресеты (Regional presets) → ${CYAN}Россия (Russia)${NC}
+     • Перезапусти режим TUN / Системный прокси.
+
+  ${BOLD}3. NekoBox / Streisand / Shadowrocket (правила вручную):${NC}
+     Добавь в маршрутизацию правило ${GREEN}Direct (Напрямую)${NC} для:
+     • GeoSite / Домены: ${CYAN}geosite:ru, geosite:category-ru${NC}
+     • GeoIP / IP-адреса: ${CYAN}geoip:ru${NC}
+     • Суффиксы доменов (если нет гео-баз):
+       ${CYAN}.ru, .su, .xn--p1ai, sberbank.ru, sber.ru, online.sberbank.ru,
+       tbank.ru, tinkoff.ru, vtb.ru, alfabank.ru, gosuslugi.ru, nalog.ru,
+       mos.ru, yandex.ru, ya.ru, yandex.net, yastatic.net, kinopoisk.ru,
+       vk.com, userapi.com, ozon.ru, wildberries.ru, wb.ru, avito.ru, 2gis.ru${NC}
+EOF
+    pause
+}
+
 usage() {
     cat <<'EOF'
 Использование: vpn-admin [команда]
 
-  (без команды)          интерактивное меню
-  status                 статус Hysteria, WARP, sniffing, ACL
-  logs                   последние строки журнала
-  link                   ссылки для клиентов
-  password [НОВЫЙ]       сменить пароль (без аргумента — интерактивно)
-  test-ai                проверить ChatGPT / Claude / Instagram через WARP
-  restart                перезапустить Hysteria и WARP
-  toggle                 остановить / запустить Hysteria
-  update                 обновить Hysteria до последней версии
-  backup                 бэкап конфига
-  info                   информация о системе
-  migrate                как переехать на новый сервер
-  domains                список доменов через WARP
-  add-domain ДОМЕН       отправить домен через WARP
-  remove-domain ДОМЕН    убрать домен из WARP
-  upgrade [-y]           включить sniffing, добавить домены, убрать дубли
-  self-update            обновить vpn-admin с GitHub
-  install-healthcheck    (пере)установить healthcheck в cron
+  (без команды)              интерактивное меню
+  status                     статус Hysteria, WARP, 5G QUIC, sniffing, Google-режима
+  logs                       последние строки журнала
+  link                       ссылки для клиентов (с sni=bing.com)
+  password [НОВЫЙ]           сменить пароль (без аргумента — интерактивно)
+  test-ai                    проверить ChatGPT / Claude / Instagram / Antigravity
+  google-mode [direct|warp]  переключить Google/Antigravity (напрямую с IP сервера или через WARP)
+  ru-bypass                  как настроить обход VPN для Сбербанка, Яндекса и Госуслуг
+  restart                    перезапустить Hysteria и WARP
+  toggle                     остановить / запустить Hysteria
+  update                     обновить Hysteria до последней версии
+  backup                     бэкап конфига
+  info                       информация о системе
+  migrate                    как переехать на новый сервер
+  domains                    список доменов через WARP
+  add-domain ДОМЕН           отправить домен через WARP
+  remove-domain ДОМЕН        убрать домен из WARP
+  upgrade [-y]               включить 5G QUIC тюнинг, sniffing, домены Antigravity и анти-QUIC
+  self-update                обновить vpn-admin с GitHub
+  install-healthcheck        (пере)установить healthcheck в cron
 EOF
 }
 
@@ -1083,6 +1475,8 @@ run_cli() {
         password)            change_password "${1:-}" ;;
         link)                show_link ;;
         test-ai)             test_ai ;;
+        google-mode)         google_mode_cmd "${1:-}" ;;
+        ru-bypass)           show_ru_bypass ;;
         restart)             restart_server ;;
         toggle)              toggle_server ;;
         update)              update_hysteria ;;
@@ -1115,27 +1509,28 @@ interactive_menu() {
         echo ""
         echo -e "${CYAN}  ═══════════════════════════════════════════════${NC}"
         echo -e "   ${BOLD}🛡️  VPN Admin Panel (Enterprise)${NC}   ${local_status}"
-        echo -e "   ${DIM}Hysteria2 + WARP + BBR + Sniffing${NC}"
+        echo -e "   ${DIM}Hysteria2 + 5G Tune + WARP + BBR + Sniffing${NC}"
         echo -e "${CYAN}  ═══════════════════════════════════════════════${NC}"
         echo ""
-        echo -e "    ${BOLD}1${NC} │ 📊  Статус сервера и WARP"
+        echo -e "    ${BOLD}1${NC} │ 📊  Статус сервера, 5G и WARP"
         echo -e "    ${BOLD}2${NC} │ 📋  Логи Hysteria 2"
         echo -e "    ${BOLD}3${NC} │ 🔑  Сменить пароль"
         echo -e "    ${BOLD}4${NC} │ 🔗  Показать ссылки"
-        echo -e "    ${BOLD}5${NC} │ 🧪  Тест обхода антифрода (ИИ & Meta)"
+        echo -e "    ${BOLD}5${NC} │ 🧪  Тест обхода антифрода (ИИ, Antigravity & Meta)"
         echo -e "    ${BOLD}6${NC} │ 🔄  Перезапуск сервисов"
         echo -e "    ${BOLD}7${NC} │ ⏯️   Стоп / Старт"
         echo -e "    ${BOLD}8${NC} │ ⬆️   Обновить Hysteria 2"
         echo -e "    ${BOLD}9${NC} │ 💾  Бэкап конфига"
         echo -e "   ${BOLD}10${NC} │ 🖥️   Инфо о системе и BBR"
         echo -e "   ${BOLD}11${NC} │ 🚚  Миграция / Справка"
-        echo -e "   ${BOLD}12${NC} │ 🌐  Домены WARP (список / добавить / убрать)"
-        echo -e "   ${BOLD}13${NC} │ 🛠️   Обновить конфиг (sniffing + домены)"
+        echo -e "   ${BOLD}12${NC} │ 🌐  Домены WARP и режим Google (direct ↔ warp)"
+        echo -e "   ${BOLD}13${NC} │ 🛠️   Обновить конфиг (5G QUIC + sniffing + домены)"
         echo -e "   ${BOLD}14${NC} │ ⬆️   Обновить vpn-admin"
+        echo -e "   ${BOLD}15${NC} │ 🇷🇺  Обход VPN для Сбербанка, Яндекса и сайтов РФ"
         echo ""
         echo -e "    ${RED}0${NC} │ 🚪  Выход"
         echo ""
-        echo -ne "  ${BOLD}Выбери пункт [0-14]: ${NC}"
+        echo -ne "  ${BOLD}Выбери пункт [0-15]: ${NC}"
         read -r choice || exit 0
 
         case "$choice" in
@@ -1153,6 +1548,7 @@ interactive_menu() {
             12) domains_menu ;;
             13) upgrade_config ;;
             14) self_update ;;
+            15) show_ru_bypass ;;
             0) echo -e "\n  ${DIM}👋 До встречи!${NC}\n"; exit 0 ;;
             *) echo -e "\n  ${RED}Неверный выбор. Попробуй ещё раз.${NC}"; sleep 1 ;;
         esac

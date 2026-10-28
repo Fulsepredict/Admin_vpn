@@ -254,10 +254,14 @@ def sourcing_scripts_does_not_run_main():
 def warp_domain_lists_match_between_scripts():
     setup_domains = bash_array("WARP_DOMAINS", SETUP)
     admin_domains = bash_array("RECOMMENDED_WARP_DOMAINS", ADMIN)
+    setup_google = bash_array("GOOGLE_DOMAINS", SETUP)
+    admin_google = bash_array("GOOGLE_DOMAINS", ADMIN)
     assert setup_domains == admin_domains, "Списки доменов в setup.sh и vpn-admin.sh расходятся"
+    assert setup_google == admin_google, "GOOGLE_DOMAINS в setup.sh и vpn-admin.sh расходятся"
     assert len(setup_domains) == len(set(setup_domains)), "В списке доменов есть повторы"
     for required in ("instagram.com", "googleapis.com", "googleusercontent.com", "claude.com",
-                     "chatgpt.com", "threads.com"):
+                     "chatgpt.com", "threads.com", "antigravity.google", "deepmind.google",
+                     "pki.goog", "gvt1.com", "1e100.net"):
         assert required in setup_domains, f"Нет обязательного домена {required}"
 
 
@@ -269,13 +273,21 @@ def rendered_config_with_warp_is_valid_and_complete():
     assert parsed["auth"] == {"type": "password", "password": "TestPass_123"}
     assert parsed["tls"]["cert"] == "/etc/hysteria/server.crt"
     assert parsed["masquerade"]["proxy"]["url"] == "https://www.bing.com"
-    # Sniffing — главное исправление: без него ACL не работает для TUN-клиентов
+    # 5G / Mobile QUIC тюнинг: отключение Brutal и защита от MTU blackhole
+    assert parsed["ignoreClientBandwidth"] is True
+    assert parsed["quic"]["disablePathMTUDiscovery"] is True
+    assert str(parsed["quic"]["maxIdleTimeout"]) == "60s"
+    # Sniffing + rewriteDomain для TUN-клиентов
     assert parsed["sniff"]["enable"] is True
-    assert parsed["sniff"]["rewriteDomain"] is False
+    assert parsed["sniff"]["rewriteDomain"] is True
     assert str(parsed["sniff"]["udpPorts"]) == "443"
     assert parsed["outbounds"][0] == {"name": "warp_proxy", "type": "socks5",
                                       "socks5": {"addr": "127.0.0.1:40000"}}
+    assert parsed["outbounds"][1] == {"name": "direct", "type": "direct",
+                                      "direct": {"mode": 46}}
     rules = acl_rules(parsed)
+    assert rules[0] == "reject(all, udp/443)", "Первым правилом должен быть запрет внешнего QUIC udp/443"
+    assert "direct(suffix:ru)" in rules and "direct(suffix:xn--p1ai)" in rules
     assert rules[-1] == "direct(all)", "direct(all) должен быть последним правилом"
     assert len(rules) == len(set(rules)), "В ACL есть дубли"
     assert warp_domains_from_rules(rules) == bash_array("WARP_DOMAINS", SETUP)
@@ -286,13 +298,16 @@ def rendered_config_without_warp_has_no_acl():
     parsed = yaml.safe_load(bash('render_config "TestPass_123" false', source=SETUP).stdout)
     assert "acl" not in parsed and "outbounds" not in parsed and "sniff" not in parsed
     assert parsed["auth"]["password"] == "TestPass_123"
+    assert parsed["ignoreClientBandwidth"] is True
+    assert parsed["quic"]["disablePathMTUDiscovery"] is True
 
 
 @test
-def sniff_block_identical_in_both_scripts():
-    a = bash("sniff_block", source=SETUP).stdout
-    b = bash("sniff_block", source=ADMIN).stdout
-    assert a == b and "enable: true" in a
+def sniff_and_quic_blocks_identical_in_both_scripts():
+    for fn in ("sniff_block", "quic_block"):
+        a = bash(fn, source=SETUP).stdout
+        b = bash(fn, source=ADMIN).stdout
+        assert a == b, f"{fn} отличается в setup.sh и vpn-admin.sh"
 
 
 @test
@@ -303,18 +318,19 @@ def links_identical_in_both_scripts_and_well_formed():
     assert a == b, "build_links в setup.sh и vpn-admin.sh дают разный результат"
     links = dict(line.split("\t", 1) for line in a.strip().splitlines())
     assert set(links) == {"porthop", "standard", "nopin", "official"}
-    assert links["porthop"] == ("hy2://Pass_word-123@203.0.113.7:443?insecure=1&alpn=h3"
+    assert links["porthop"] == ("hy2://Pass_word-123@203.0.113.7:443?insecure=1&sni=bing.com&alpn=h3"
                                 "&pinSHA256=ab12cd&mport=443,20000-50000#Hysteria2-PortHop")
-    assert links["standard"] == ("hy2://Pass_word-123@203.0.113.7:443?insecure=1&alpn=h3"
+    assert links["standard"] == ("hy2://Pass_word-123@203.0.113.7:443?insecure=1&sni=bing.com&alpn=h3"
                                  "&pinSHA256=ab12cd#Hysteria2")
-    assert "pinSHA256" not in links["nopin"] and "mport=443,20000-50000" in links["nopin"]
-    assert links["official"].startswith("hysteria2://Pass_word-123@203.0.113.7:443,20000-50000/?")
+    assert "pinSHA256" not in links["nopin"] and "sni=bing.com" in links["nopin"]
+    assert links["official"].startswith("hysteria2://Pass_word-123@203.0.113.7:443,20000-50000/?insecure=1&sni=bing.com")
 
 
 @test
 def links_without_pin_have_no_empty_parameter():
     out = bash('build_links "203.0.113.7" "Pass_word-123" ""', source=ADMIN).stdout
     assert "pinSHA256" not in out
+    assert "sni=bing.com" in out
 
 
 @test
@@ -350,7 +366,7 @@ def password_validation_rejects_unsafe_input():
 
 @test
 def domain_validation_rejects_bad_input():
-    good = ["example.com", "sub.example.co.uk", "x-y.io", "tiktok.com"]
+    good = ["example.com", "sub.example.co.uk", "x-y.io", "tiktok.com", "antigravity.google", "pki.goog"]
     bad = ["", "com", "-bad.com", "bad-.com", "no_underscore.com", "UPPER.COM", "spa ce.com",
            "a..b.com", "domain", "evil.com)\n- direct(all", "1.2.3.4", "пример.рф"]
     # validate_domain есть в обоих скриптах — они должны вести себя одинаково
@@ -436,6 +452,7 @@ def add_sniff_block_is_idempotent():
         bash('add_sniff_block "$CFG"', env=env)
         assert cfg.read().count("\nsniff:") == 1
         assert cfg.yaml()["sniff"]["enable"] is True
+        assert cfg.yaml()["sniff"]["rewriteDomain"] is True
         assert bash('sniff_is_enabled "$CFG"', env=env, check=False).returncode == 0
 
 
@@ -448,10 +465,9 @@ def sniff_is_enabled_detects_disabled_sniff():
 
 
 @test
-def upgrade_enables_disabled_sniff():
-    # status советует «vpn-admin upgrade», значит upgrade обязан включить выключенный sniffing
+def upgrade_enables_disabled_sniff_and_rewrite_domain():
     variants = {
-        "enable: false": "\nsniff:\n  enable: false\n  timeout: 2s\n",
+        "enable: false": "\nsniff:\n  enable: false\n  timeout: 2s\n  rewriteDomain: false\n",
         "без строки enable": "\nsniff:\n  timeout: 2s\n",
     }
     for title, block in variants.items():
@@ -461,6 +477,7 @@ def upgrade_enables_disabled_sniff():
             assert "sniff-enabled" in out and "sniff-added" not in out, f"{title}: {out!r}"
             parsed = cfg.yaml()
             assert parsed["sniff"]["enable"] is True, title
+            assert parsed["sniff"]["rewriteDomain"] is True, title
             assert str(parsed["sniff"]["timeout"]) == "2s", f"{title}: задеты другие настройки"
             assert cfg.read().count("\nsniff:") == 1, f"{title}: блок sniff продублирован"
 
@@ -495,15 +512,23 @@ def custom_domains_survive_setup_rerun():
 def upgrade_fixes_legacy_live_config():
     with TempConfig(LEGACY_CONFIG) as cfg:
         out = bash('upgrade_config_file "$CFG"', env={"CFG": cfg.bash_path}).stdout
+        assert "quic-tuned" in out
         assert "sniff-added" in out
-        assert "domain-added claude.com" in out and "domain-added googleusercontent.com" in out
+        assert "direct-ipv4-added" in out
+        assert "udp443-reject-added" in out
+        assert "domain-added claude.com" in out and "domain-added antigravity.google" in out
         assert "domain-added googleapis.com" not in out, "уже существующий домен добавлен повторно"
         assert "duplicates-removed" in out
 
         parsed = cfg.yaml()
         assert parsed["auth"]["password"] == "OldPassword123", "upgrade не должен менять пароль"
+        assert parsed["ignoreClientBandwidth"] is True
+        assert parsed["quic"]["disablePathMTUDiscovery"] is True
         assert parsed["sniff"]["enable"] is True
+        assert parsed["sniff"]["rewriteDomain"] is True
         rules = acl_rules(parsed)
+        assert rules[0] == "reject(all, udp/443)"
+        assert "direct(suffix:ru)" in rules
         assert len(rules) == len(set(rules))
         assert rules[-1] == "direct(all)"
         assert set(bash_array("RECOMMENDED_WARP_DOMAINS", ADMIN)) <= set(warp_domains_from_rules(rules))
@@ -512,6 +537,36 @@ def upgrade_fixes_legacy_live_config():
         snapshot = cfg.read()
         again = bash('upgrade_config_file "$CFG"', env={"CFG": cfg.bash_path}).stdout
         assert again.strip() == "" and cfg.read() == snapshot
+
+
+@test
+def google_mode_switches_between_direct_and_warp_and_survives_upgrade():
+    fresh = bash('render_config "TestPass_123" true', source=SETUP).stdout
+    with TempConfig(fresh) as cfg:
+        env = {"CFG": cfg.bash_path}
+        assert bash('get_google_mode "$CFG"', env=env).stdout.strip() == "warp"
+
+        bash('set_google_mode_in_file "$CFG" "direct"', env=env)
+        assert bash('get_google_mode "$CFG"', env=env).stdout.strip() == "direct"
+        rules = acl_rules(cfg.yaml())
+        assert "direct(suffix:google.com)" in rules
+        assert "direct(suffix:antigravity.google)" in rules
+        assert "warp_proxy(suffix:google.com)" not in rules
+        # Другие сервисы остались в WARP
+        assert "warp_proxy(suffix:instagram.com)" in rules
+        assert "warp_proxy(suffix:chatgpt.com)" in rules
+
+        # Повторный upgrade не должен сбрасывать выбранный режим direct
+        bash('upgrade_config_file "$CFG"', env=env)
+        assert bash('get_google_mode "$CFG"', env=env).stdout.strip() == "direct"
+        assert "direct(suffix:antigravity.google)" in acl_rules(cfg.yaml())
+
+        # Возврат в режим warp
+        bash('set_google_mode_in_file "$CFG" "warp"', env=env)
+        assert bash('get_google_mode "$CFG"', env=env).stdout.strip() == "warp"
+        rules_back = acl_rules(cfg.yaml())
+        assert "warp_proxy(suffix:google.com)" in rules_back
+        assert "warp_proxy(suffix:antigravity.google)" in rules_back
 
 
 @test
@@ -549,10 +604,11 @@ def generated_password_is_safe():
 
 
 @test
-def healthcheck_script_is_valid_and_checks_warp_tunnel():
+def healthcheck_script_is_valid_and_checks_warp_tunnel_with_retries():
     script = bash("healthcheck_script").stdout
     assert "__" not in script, "остались незаменённые плейсхолдеры"
     assert 'WARP_PORT=40000' in script and "warp=on" in script
+    assert "for attempt in 1 2 3" in script, "healthcheck должен делать 3 попытки перед рестартом"
     assert "tail -n" in script, "нет ротации лога"
     with TempConfig(script) as tmp:
         bash(f'bash -n "{tmp.bash_path}"', source=None)
@@ -598,6 +654,7 @@ def installer_has_no_dangerous_operations():
     assert "chmod 640" in setup, "ключ и конфиг должны быть закрыты (640)"
     assert "iptables -t nat -C" in setup, "NAT-правило должно проверяться перед добавлением"
     assert "DPkg::Lock::Timeout" in setup
+    assert "-net.netfilter.nf_conntrack_max" in setup, "nf_conntrack должен иметь безопасный префикс -"
 
 
 @test
@@ -618,7 +675,8 @@ def repository_urls_are_consistent():
 @test
 def readme_documents_new_commands():
     readme = read_text("README.md")
-    for snippet in ("vpn-admin upgrade", "add-domain", "pinSHA256", "sniff", "install.sh"):
+    for snippet in ("vpn-admin upgrade", "add-domain", "pinSHA256", "sniff", "install.sh",
+                    "google-mode", "ru-bypass"):
         assert snippet in readme, f"README не описывает: {snippet}"
     assert "Zero-Detect" not in readme, "README не должен обещать невыполнимое"
 
